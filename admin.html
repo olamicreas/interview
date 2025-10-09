@@ -64,8 +64,7 @@
       <div class="card">
         <h2 style="margin:0 0 8px 0">Generate licenses</h2>
 
-  
-
+   
         <div id="controls">
           <label>Username</label>
           <input id="username" placeholder="e.g. alice@example.com">
@@ -197,18 +196,38 @@
     }
   }
 
-  // try automatic fetch from same origin path first
+  // Fetch licenses.json from the same directory
+  async function fetchLicensesJson(url = './licenses.json') {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (j.licenses && Array.isArray(j.licenses)) {
+        // Save to localStorage to initialize
+        localStorage.setItem(LS_LICENSES, JSON.stringify(j.licenses));
+        return j.licenses;
+      }
+      return [];
+    } catch (err) {
+      console.warn(`Failed to load licenses.json: ${err.message}`);
+      return loadLicenses(); // Fallback to localStorage
+    }
+  }
+
+  // try automatic fetch of admin.json and licenses.json
   (async ()=>{
     const ok = await fetchAdminJson('./admin.json');
     if (!ok) {
       // try without leading slash as fallback
       await fetchAdminJson('admin.json');
     }
-    // show the login modal regardless — if admin.json not available user can load it via file/URL
+    // Initialize licenses from licenses.json
+    await fetchLicensesJson();
+    // Show the login modal
     showLoginModal();
   })();
 
-  // file load handler
+  // file load handler for admin.json
   btnLoadFile.addEventListener('click', ()=>{
     if (!adminFileInput.files || adminFileInput.files.length === 0) {
       alert('Choose an admin.json file first');
@@ -304,7 +323,7 @@
   function saveLicenses(arr){
     // Save to localStorage
     localStorage.setItem(LS_LICENSES, JSON.stringify(arr));
-    // Save to licenses.json file
+    // Save to licenses.json file (client-side download)
     const obj = { licenses: arr };
     const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
     const a = document.createElement('a'); 
@@ -344,7 +363,7 @@
   function makePassword(){ return Math.random().toString(36).slice(2, 12); }
 
   // Generate license (only allowed if logged in)
-  btnGenerate.addEventListener('click', ()=>{
+  btnGenerate.addEventListener('click', async ()=>{
     if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     const username = usernameEl.value.trim();
     const hours = Number(hoursEl.value) || 0;
@@ -353,8 +372,13 @@
     const expiry = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
     const password = makePassword();
     const license = { username, password, expiry };
-    const arr = loadLicenses(); arr.push(license); saveLicenses(arr);
-    usernameEl.value = ''; message.textContent = `License generated for ${license.username} (expires ${expiry}) and saved to licenses.json`; message.className = 'note ok';
+    // Load existing licenses from localStorage or licenses.json
+    const arr = loadLicenses();
+    arr.push(license);
+    saveLicenses(arr);
+    usernameEl.value = '';
+    message.textContent = `License generated for ${license.username} (expires ${expiry}) and saved to licenses.json`;
+    message.className = 'note ok';
   });
 
   btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
@@ -362,7 +386,9 @@
   btnClearAll.addEventListener('click', ()=>{
     if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     if(!confirm('Clear all licenses? This cannot be undone.')) return;
-    saveLicenses([]); message.textContent = 'All licenses cleared.'; message.className = 'note';
+    saveLicenses([]);
+    message.textContent = 'All licenses cleared and saved to licenses.json';
+    message.className = 'note';
   });
 
   btnDownloadAll.addEventListener('click', ()=>{
@@ -370,7 +396,8 @@
     const obj = { licenses: loadLicenses() };
     const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
-    message.textContent = 'licenses.json downloaded'; message.className = 'note';
+    message.textContent = 'licenses.json downloaded';
+    message.className = 'note';
   });
 
   btnCopyAll.addEventListener('click', async ()=>{
