@@ -1,5 +1,3 @@
-# app.py
-
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from datetime import datetime, timedelta
 import json
@@ -7,6 +5,7 @@ import os
 import random
 import string
 from functools import wraps
+import uuid # Imported for generating session tokens
 
 app = Flask(__name__)
 
@@ -48,6 +47,7 @@ def admin_required(f):
             if request.path.startswith('/api/'):
                 return jsonify({"error": "Admin login required"}), 401
             # For page routes, redirect to login (or serve the admin page with the modal)
+            # Assuming client-side login is handled by the template
             return render_template('admin.html', admin_password=ADMIN_PASSWORD)
         return f(*args, **kwargs)
     return decorated_function
@@ -77,7 +77,7 @@ def logout():
     resp.delete_cookie('admin_logged_in')
     return resp
 
-# --- API ENDPOINTS (Require Authentication) ---
+# --- API ENDPOINTS (Require Admin Authentication) ---
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
@@ -150,6 +150,63 @@ def download_licenses_file():
     """Serves the licenses.json file for download."""
     return send_file(LICENSE_FILE, as_attachment=True, download_name='licenses.json')
 
+# --- REMOTE AUTHENTICATION ENDPOINT (For Desktop App) ---
+
+@app.route('/api/v1/licenses/auth', methods=['POST'])
+def remote_auth():
+    """
+    Handles remote login requests from the desktop application (SessionManager.login_remote).
+    Checks credentials against licenses.json and returns a session token and expiry.
+    """
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    licenses = load_licenses()
+
+    # Find the matching license
+    match = next((lic for lic in licenses if lic.get('username') == username), None)
+
+    if not match:
+        return jsonify({"error": "Username not found"}), 401
+    
+    # 1. Check Password
+    if password != match.get('password'):
+        return jsonify({"error": "Invalid password"}), 401
+
+    # 2. Check Expiry
+    expiry_str = match.get('expiry')
+    if expiry_str:
+        try:
+            # Parse expiry string (stripping 'Z' if present for compatibility with fromisoformat)
+            expiry_dt = datetime.fromisoformat(expiry_str.rstrip('Z'))
+            
+            # If the expiry has passed, reject the login
+            if expiry_dt < datetime.utcnow():
+                return jsonify({"error": "License expired"}), 403
+            
+            # Calculate remaining seconds for the client
+            expires_in_seconds = (expiry_dt - datetime.utcnow()).total_seconds()
+            
+        except ValueError:
+            # Handle malformed date string
+            return jsonify({"error": "Invalid license expiry format"}), 500
+    else:
+        # Should not happen if licenses are generated correctly, but handle it
+        return jsonify({"error": "License expiry date missing"}), 500
+
+    # 3. Success: Return token and remaining expiry time
+    response_data = {
+        # The desktop app only needs the expiry time and a non-empty token
+        "token": str(uuid.uuid4()),
+        "expires_in": int(expires_in_seconds)
+    }
+
+    return jsonify(response_data), 200
+
 
 if __name__ == '__main__':
     # Flask needs a 'templates' folder for render_template
@@ -158,4 +215,7 @@ if __name__ == '__main__':
     if not os.path.exists(LICENSE_FILE):
         save_licenses([])
         
+    # NOTE: In a production environment like Render, the app is typically run 
+    # using Gunicorn (e.g., gunicorn app:app) and this block is ignored.
     app.run(debug=True)
+
