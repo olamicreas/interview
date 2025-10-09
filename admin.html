@@ -64,21 +64,6 @@
       <div class="card">
         <h2 style="margin:0 0 8px 0">Generate licenses</h2>
 
-        <!-- Admin file loader (only visible if fetch fails or admin.json isn't available) -->
-        <div id="adminLoader" class="card" style="margin-bottom:12px;">
-          <label>Load admin.json (server path: <code>/admin.json</code>)</label>
-          <div class="row">
-            <input id="adminUrl" placeholder="Optional: raw URL to admin.json (GitHub raw...)" />
-            <button id="btnFetchAdmin" class="btn btn-ghost" style="flex:0 0 120px">Fetch</button>
-          </div>
-          <div style="height:8px"></div>
-          <div class="row">
-            <input id="adminFileInput" type="file" accept=".json">
-            <button id="btnLoadFile" class="btn btn-ghost" style="flex:0 0 120px">Load file</button>
-          </div>
-          <div id="adminStatus" class="note">Attempting to load <code>/admin.json</code> automatically...</div>
-        </div>
-
         <div id="controls">
           <label>Username</label>
           <input id="username" placeholder="e.g. alice@example.com">
@@ -147,12 +132,6 @@
   const LS_LICENSES = 'ia_licenses_v1';
 
   // elements
-  const adminUrl = document.getElementById('adminUrl');
-  const btnFetchAdmin = document.getElementById('btnFetchAdmin');
-  const adminFileInput = document.getElementById('adminFileInput');
-  const btnLoadFile = document.getElementById('btnLoadFile');
-  const adminStatus = document.getElementById('adminStatus');
-
   const usernameEl = document.getElementById('username');
   const hoursEl = document.getElementById('hours');
   const btnGenerate = document.getElementById('btnGenerate');
@@ -190,7 +169,6 @@
   }
 
   async function fetchAdminJson(url = './admin.json') {
-    adminStatus.textContent = `Loading admin.json from: ${url}`;
     try {
       const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -199,13 +177,13 @@
       if (!pw) throw new Error('No password found in JSON');
       adminData = j;
       adminPrimaryPassword = pw;
-      adminStatus.textContent = `admin.json loaded from ${url} (password present).`;
-      adminStatus.className = 'note ok';
+      loginMsg.textContent = `admin.json loaded from ${url} (password present).`;
+      loginMsg.className = 'note ok';
       return true;
     } catch (err) {
       adminData = null; adminPrimaryPassword = null;
-      adminStatus.textContent = `Failed to load admin.json from ${url}: ${err.message}`;
-      adminStatus.className = 'note danger';
+      loginMsg.textContent = `Failed to load admin.json from ${url}: ${err.message}`;
+      loginMsg.className = 'note danger';
       return false;
     }
   }
@@ -241,44 +219,6 @@
     showLoginModal();
   })();
 
-  // file load handler for admin.json
-  btnLoadFile.addEventListener('click', ()=>{
-    if (!adminFileInput.files || adminFileInput.files.length === 0) {
-      alert('Choose an admin.json file first');
-      return;
-    }
-    const file = adminFileInput.files[0];
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const obj = JSON.parse(ev.target.result);
-        const pw = tryExtractPassword(obj);
-        if(!pw) throw new Error('No password found in JSON');
-        adminData = obj;
-        adminPrimaryPassword = pw;
-        adminStatus.textContent = 'admin.json loaded from local file (in memory only).';
-        adminStatus.className = 'note ok';
-        loginMsg.textContent = '';
-        // reopen login modal if closed
-        showLoginModal();
-      } catch(e) {
-        adminStatus.textContent = 'Invalid admin.json: ' + e.message;
-        adminStatus.className = 'note danger';
-        alert('Failed to parse admin.json: ' + e.message);
-      }
-    };
-    reader.onerror = () => alert('File read error');
-    reader.readAsText(file);
-  });
-
-  // fetch by URL handler
-  btnFetchAdmin.addEventListener('click', async ()=>{
-    const url = (adminUrl.value || '').trim();
-    if (!url) return alert('Enter a raw URL to admin.json (e.g. raw.githubusercontent.com/...)');
-    const ok = await fetchAdminJson(url);
-    if (ok) showLoginModal();
-  });
-
   // login modal control
   function showLoginModal() {
     // always show login modal on page load
@@ -296,7 +236,7 @@
   btnLogin.addEventListener('click', ()=>{
     const entered = (loginPass.value || '').trim();
     if (!adminPrimaryPassword) {
-      loginMsg.textContent = 'No admin.json loaded. Load it via file or URL then try again.';
+      loginMsg.textContent = 'No admin.json loaded. Please ensure admin.json is available.';
       return;
     }
     if (!entered) {
