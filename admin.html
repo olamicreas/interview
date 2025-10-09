@@ -47,7 +47,7 @@
     <header>
       <a class="brand" href="index.html"><div class="logo">IA</div><div><div style="font-weight:700">Interview Assistant</div><div class="small muted">Admin — License Generator</div></div></a>
       <div style="text-align:right">
-        <div class="small muted">Run locally — export licenses.json to GitHub</div>
+        <div class="small muted">Admin file (admin.json) must be loaded each session</div>
       </div>
     </header>
 
@@ -55,14 +55,20 @@
       <div class="card">
         <h2 style="margin:0 0 8px 0">Generate licenses</h2>
 
-        <!-- Admin login -->
-        <div id="loginBox">
-          <label>Admin password (set a new one or enter existing)</label>
+        <!-- Admin file loader -->
+        <div id="adminLoader">
+          <label>Load admin.json (contains admin password)</label>
           <div class="row">
-            <input id="adminPassword" type="password" placeholder="Set / Enter admin password">
-            <button id="btnSetPass" class="btn btn-ghost" style="flex:0 0 120px">Save</button>
+            <input id="adminUrl" placeholder="Optional: raw URL to admin.json (GitHub raw...)">
+            <button id="btnFetchAdmin" class="btn btn-ghost" style="flex:0 0 120px">Fetch</button>
           </div>
-          <div class="note">Password is stored locally in your browser (localStorage). The login prompt will show once per browser until you clear storage.</div>
+          <div style="height:8px"></div>
+          <div class="row">
+            <input id="adminFileInput" type="file" accept=".json">
+            <button id="btnLoadFile" class="btn btn-ghost" style="flex:0 0 120px">Load file</button>
+          </div>
+          <div id="adminStatus" class="note">No admin file loaded. Admin will be prompted every time.</div>
+          <div style="height:10px"></div>
         </div>
 
         <hr style="border:none;height:1px;background:rgba(255,255,255,0.02);margin:12px 0">
@@ -97,11 +103,13 @@
           </div>
 
           <div class="note" style="margin-top:10px">
-            Each license is a JSON object `{ "username": "...", "password": "...", "expiry": "ISO" }`. You can combine them into a single `licenses.json` that your app will fetch from GitHub.
+            Each license is a JSON object `{ "username": "...", "password": "...", "expiry": "ISO" }`. You can combine them into a single `licenses.json` that your app will fetch from GitHub or host as raw content.
           </div>
         </div>
       </div>
 
+      <!-- right column left intentionally empty (keeps layout balance) -->
+      <aside class="card" style="display:none"></aside>
     </div>
 
     <footer>
@@ -114,12 +122,15 @@
   const yearEl = document.getElementById('year'); yearEl.textContent = new Date().getFullYear();
 
   // storage keys
-  const LS_ADMIN_PASS = 'ia_admin_pass_v1';
   const LS_LICENSES = 'ia_licenses_v1';
 
   // elements
-  const adminPassword = document.getElementById('adminPassword');
-  const btnSetPass = document.getElementById('btnSetPass');
+  const adminUrl = document.getElementById('adminUrl');
+  const btnFetchAdmin = document.getElementById('btnFetchAdmin');
+  const adminFileInput = document.getElementById('adminFileInput');
+  const btnLoadFile = document.getElementById('btnLoadFile');
+  const adminStatus = document.getElementById('adminStatus');
+
   const usernameEl = document.getElementById('username');
   const hoursEl = document.getElementById('hours');
   const btnGenerate = document.getElementById('btnGenerate');
@@ -132,16 +143,99 @@
   const licensesTable = document.getElementById('licensesTable');
   const licensesBody = document.getElementById('licensesBody');
 
-  const ghOwner = document.getElementById('ghOwner');
-  const ghRepo = document.getElementById('ghRepo');
-  const ghPath = document.getElementById('ghPath');
-  const ghMessage = document.getElementById('ghMessage');
-  const ghToken = document.getElementById('ghToken');
-  const btnUpload = document.getElementById('btnUpload');
-  const btnPreview = document.getElementById('btnPreview');
-  const ghStatus = document.getElementById('ghStatus');
+  // in-memory admin data (never persisted)
+  // expected shapes supported:
+  // { "admin_password": "..." }  OR  { "password": "..." }  OR  { "admins": [{ "password": "..."}, ...] }
+  let adminData = null;
+  let adminPrimaryPassword = null; // extracted password to check against
 
-  // load licenses from localStorage
+  function setAdminLoaded(sourceDesc){
+    adminStatus.textContent = `Admin file loaded (${sourceDesc}). Admin will be prompted for password on each action.`;
+    adminStatus.className = 'note ok';
+  }
+  function setAdminCleared(){
+    adminData = null; adminPrimaryPassword = null;
+    adminStatus.textContent = 'No admin file loaded. Please load admin.json to enable generation (or paste a URL).';
+    adminStatus.className = 'note';
+  }
+
+  // parse admin file object, extract a usable password
+  function loadAdminObject(obj){
+    if(!obj || typeof obj !== 'object') throw new Error('Invalid JSON object');
+    // try common keys
+    if(obj.admin_password && typeof obj.admin_password === 'string') {
+      adminPrimaryPassword = obj.admin_password;
+      adminData = obj;
+      return;
+    }
+    if(obj.password && typeof obj.password === 'string') {
+      adminPrimaryPassword = obj.password;
+      adminData = obj;
+      return;
+    }
+    if(Array.isArray(obj.admins) && obj.admins.length && obj.admins[0].password){
+      adminPrimaryPassword = obj.admins[0].password;
+      adminData = obj;
+      return;
+    }
+    // fallback: if single key with string value, take first string
+    const stringValKey = Object.keys(obj).find(k => typeof obj[k] === 'string');
+    if(stringValKey){
+      adminPrimaryPassword = obj[stringValKey];
+      adminData = obj;
+      return;
+    }
+    throw new Error('Could not find admin password in JSON. Expected keys: admin_password, password, admins[].password');
+  }
+
+  // fetch admin JSON from a raw URL
+  btnFetchAdmin.addEventListener('click', async ()=>{
+    const url = (adminUrl.value || '').trim();
+    if(!url) return alert('Enter a raw URL to admin.json (e.g. raw.githubusercontent.com/...)');
+    adminStatus.textContent = 'Fetching admin.json...';
+    try{
+      const r = await fetch(url, { method: 'GET' });
+      if(!r.ok) throw new Error('Fetch failed: ' + r.status);
+      const j = await r.json();
+      loadAdminObject(j);
+      setAdminLoaded('fetched URL');
+      message.textContent = 'Admin JSON fetched and parsed (in memory only).';
+      message.className = 'note ok';
+    }catch(err){
+      console.error(err);
+      adminStatus.textContent = 'Failed to fetch/parse admin.json: ' + err.message;
+      adminStatus.className = 'note danger';
+      alert('Failed to load admin.json: ' + err.message);
+    }
+  });
+
+  // load admin JSON from a selected file
+  btnLoadFile.addEventListener('click', ()=>{
+    const fi = adminFileInput;
+    if(!fi.files || fi.files.length === 0) return alert('Choose a local admin.json file first');
+    const f = fi.files[0];
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try{
+        const j = JSON.parse(ev.target.result);
+        loadAdminObject(j);
+        setAdminLoaded('local file');
+        message.textContent = 'Admin JSON loaded in memory (never saved).';
+        message.className = 'note ok';
+      }catch(err){
+        console.error(err);
+        adminStatus.textContent = 'Invalid admin.json file';
+        adminStatus.className = 'note danger';
+        alert('Failed to parse admin.json: ' + err.message);
+      }
+    };
+    reader.onerror = (e) => {
+      alert('File read error');
+    };
+    reader.readAsText(f);
+  });
+
+  // license storage helpers (licenses stored in localStorage)
   function loadLicenses(){
     try{
       const raw = localStorage.getItem(LS_LICENSES);
@@ -155,7 +249,6 @@
     localStorage.setItem(LS_LICENSES, JSON.stringify(arr));
     renderLicenses();
   }
-
   function renderLicenses(){
     const licenses = loadLicenses();
     licensesBody.innerHTML = '';
@@ -174,6 +267,7 @@
       btnRemove.className = 'btn btn-ghost';
       btnRemove.textContent = 'Remove';
       btnRemove.onclick = () => {
+        if(!adminConfirm('remove this license')) return;
         const arr = loadLicenses(); arr.splice(idx,1); saveLicenses(arr);
       };
       tdAct.appendChild(btnRemove);
@@ -182,44 +276,28 @@
     });
   }
 
-  // admin password saved in localStorage (not secure — only convenient for small local admin)
-  function setAdminPassword(pw){
-    if(!pw) { alert('Enter a password'); return; }
-    localStorage.setItem(LS_ADMIN_PASS, pw);
-    message.textContent = 'Admin password saved locally.';
-    message.className = 'note ok';
-  }
-  function checkAdminPassword(promptIfMissing=true){
-    const saved = localStorage.getItem(LS_ADMIN_PASS);
-    if(!saved){
-      if(promptIfMissing){
-        // if no admin password set, ask to set one via UI
-        message.textContent = 'Set an admin password to continue.';
-        message.className = 'note';
-      }
+  // Prompt the admin for password and validate against loaded adminPrimaryPassword
+  // Always prompts (never caches admin confirmation)
+  function adminConfirm(actionLabel = 'perform this action'){
+    if(!adminPrimaryPassword){
+      alert('No admin.json loaded. Load admin.json first (local file or URL).');
       return false;
     }
-    const entered = prompt('Admin password required to continue (enter password):');
+    const entered = prompt(`Admin password required to ${actionLabel}:`);
     if(entered === null) return false;
-    if(entered === saved) {
-      message.textContent = 'Admin confirmed.';
-      message.className = 'note ok';
-      return true;
-    }
+    if(entered === adminPrimaryPassword) return true;
     alert('Incorrect admin password.');
     return false;
   }
 
-  // simple random password
+  // password generator
   function makePassword(){
-    // 10-char alnum
     return Math.random().toString(36).slice(2, 12);
   }
 
-  // license creation
+  // license generation
   btnGenerate.addEventListener('click', ()=>{
-    // require admin check
-    if(!checkAdminPassword(true)) return;
+    if(!adminConfirm('generate a license')) return;
     const username = usernameEl.value.trim();
     const hours = Number(hoursEl.value) || 0;
     if(!username) return alert('Enter username');
@@ -233,7 +311,6 @@
     arr.push(license);
     saveLicenses(arr);
 
-    // clear input
     usernameEl.value = '';
     message.textContent = `License generated for ${license.username} (expires ${expiry})`;
     message.className = 'note ok';
@@ -242,23 +319,17 @@
   btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
 
   btnClearAll.addEventListener('click', ()=>{
-    if(!checkAdminPassword(true)) return;
+    if(!adminConfirm('clear all licenses')) return;
     if(!confirm('Clear all licenses? This cannot be undone.')) return;
     saveLicenses([]);
     message.textContent = 'All licenses cleared.';
     message.className = 'note';
   });
 
-  // download combined json
-  function buildLicensesJSON(){
-    const arr = loadLicenses();
-    // you can structure licenses.json however you prefer. Default: an array of objects.
-    return { licenses: arr };
-  }
-
   btnDownloadAll.addEventListener('click', ()=>{
-    if(!checkAdminPassword(true)) return;
-    const blob = new Blob([JSON.stringify(buildLicensesJSON(), null, 2)], {type:'application/json'});
+    if(!adminConfirm('download licenses.json')) return;
+    const obj = { licenses: loadLicenses() };
+    const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
     message.textContent = 'licenses.json downloaded';
@@ -266,8 +337,8 @@
   });
 
   btnCopyAll.addEventListener('click', async ()=>{
-    if(!checkAdminPassword(true)) return;
-    const txt = JSON.stringify(buildLicensesJSON(), null, 2);
+    if(!adminConfirm('copy licenses JSON to clipboard')) return;
+    const txt = JSON.stringify({ licenses: loadLicenses() }, null, 2);
     try{
       await navigator.clipboard.writeText(txt);
       message.textContent = 'licenses.json copied to clipboard';
@@ -277,105 +348,25 @@
     }
   });
 
-  // GitHub upload helpers
-  async function getGitHubFileSha(owner, repo, path, token){
-    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
-    const r = await fetch(url, {
-      method: 'GET',
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
-    });
-    if(r.status === 404) return null;
-    if(!r.ok) throw new Error('Failed to get file info: ' + (await r.text()));
-    const j = await r.json(); return j.sha;
-  }
-
-  async function uploadToGitHub({owner, repo, path, message, token, contentBase64, sha=null}){
-    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
-    const body = { message, content: contentBase64, branch: undefined };
-    if(sha) body.sha = sha;
-    const r = await fetch(url, {
-      method: 'PUT',
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' },
-      body: JSON.stringify(body)
-    });
-    return r;
-  }
-
-  btnPreview.addEventListener('click', ()=>{
-    const txt = JSON.stringify(buildLicensesJSON(), null, 2);
-    const w = window.open('', '_blank');
-    w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace;padding:12px">${escapeHtml(txt)}</pre>`);
-    w.document.title = 'licenses.json preview';
-  });
-
-  btnUpload.addEventListener('click', async ()=>{
-    if(!checkAdminPassword(true)) return;
-    const owner = ghOwner.value.trim();
-    const repo = ghRepo.value.trim();
-    const path = ghPath.value.trim() || 'licenses.json';
-    const messageText = ghMessage.value.trim() || 'Update licenses.json';
-    const token = ghToken.value.trim();
-    if(!owner || !repo || !token) return alert('Enter owner, repo and PAT token');
-
-    ghStatus.textContent = 'Preparing upload...'; ghStatus.className = 'note';
-    try{
-      const jsonObj = buildLicensesJSON();
-      const content = JSON.stringify(jsonObj, null, 2);
-      const contentBase64 = btoa(unescape(encodeURIComponent(content))); // utf-8 safe
-
-      // check existing file to get sha
-      ghStatus.textContent = 'Checking existing file...';
-      const sha = await (async ()=>{
-        try{
-          return await getGitHubFileSha(owner, repo, path, token);
-        }catch(e){
-          // throw visible error
-          throw new Error('Could not check file: ' + e.message);
-        }
-      })();
-
-      ghStatus.textContent = sha ? 'Updating file on GitHub...' : 'Creating file on GitHub...';
-      const resp = await uploadToGitHub({owner, repo, path, message: messageText, token, contentBase64, sha});
-      if(!resp.ok){
-        const text = await resp.text();
-        throw new Error('GitHub API error: ' + (text || resp.status));
-      }
-      const j = await resp.json();
-      ghStatus.textContent = 'Upload successful ✓';
-      ghStatus.className = 'note ok';
-      // return raw URL
-      const downloadUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/${path}`;
-      const msg = `Uploaded. Raw file URL (may require branch name adjustments): ${downloadUrl}`;
-      alert(msg);
-    }catch(err){
-      ghStatus.textContent = 'Upload failed: ' + err.message;
-      ghStatus.className = 'note danger';
-      console.error(err);
-      alert('Upload failed: ' + err.message);
-    }
-  });
-
-  // helper
+  // helpers
   function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-  // Set password button
-  btnSetPass.addEventListener('click', ()=>{
-    const val = adminPassword.value.trim();
-    if(!val) return alert('Enter a password to save');
-    localStorage.setItem(LS_ADMIN_PASS, val);
-    adminPassword.value = '';
-    message.textContent = 'Admin password saved locally. You will be prompted once to confirm for actions.';
-    message.className = 'note ok';
-  });
 
   // initial render
   renderLicenses();
+  setAdminCleared();
 
-  // If no admin password set, prompt the admin to choose one on first load (non-blocking)
-  if(!localStorage.getItem(LS_ADMIN_PASS)){
-    message.textContent = 'No admin password set — please set one to protect license generation.';
-    message.className = 'note';
-  }
+  // optionally auto-load an admin file if admin.json URL passed in query ?admin=...
+  (function tryAutoLoadFromQuery(){
+    try{
+      const params = new URLSearchParams(window.location.search);
+      const a = params.get('admin');
+      if(!a) return;
+      // attempt to fetch raw URL immediately (no prompt)
+      fetch(a).then(r => r.json()).then(j => { loadAdminObject(j); setAdminLoaded('auto fetched'); })
+        .catch(e => { console.warn('Auto-load admin.json failed:', e); });
+    }catch(e){}
+  })();
+
 })();
 </script>
 </body>
