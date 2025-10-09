@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 LICENSE_FILE = 'licenses.json'
-ADMIN_PASSWORD = 'super-secure-admin-password' # !!! CHANGE THIS !!!
+ADMIN_PASSWORD = 'Kunle321' # !!! CHANGE THIS !!!
 # --- END CONFIGURATION ---
 
 # Initialize license file if it doesn't exist
