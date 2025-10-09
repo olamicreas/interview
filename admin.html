@@ -128,7 +128,7 @@
 (() => {
   const yearEl = document.getElementById('year'); yearEl.textContent = new Date().getFullYear();
 
-  // in-memory licenses (no local file write)
+  // in-memory licenses (no localStorage, per request)
   let licensesArr = [];
 
   // elements
@@ -141,6 +141,7 @@
   const btnClearAll = document.getElementById('btnClearAll');
   const btnLogout = document.getElementById('btnLogout');
   const message = document.getElementById('message');
+
   const licensesTable = document.getElementById('licensesTable');
   const licensesBody = document.getElementById('licensesBody');
 
@@ -150,18 +151,20 @@
   const btnReloadAdmin = document.getElementById('btnReloadAdmin');
   const loginMsg = document.getElementById('loginMsg');
 
-  // admin.json in-memory (read-only in-memory)
+  // in-memory admin data (never persisted by this script)
+  // expected fields: admin_password, pat, github: { owner, repo, path, branch }
   let adminData = null;
-  let adminPrimaryPassword = null;
+  let adminPrimaryPassword = null; // extracted
+
+  // Defaults (change if you want different fallback)
+  const DEFAULT_GITHUB = { owner: "olamicreas", repo: "interview", path: "licenses.json", branch: "master" };
 
   function tryExtractPassword(obj) {
     if (!obj || typeof obj !== 'object') return null;
     if (typeof obj.admin_password === 'string') return obj.admin_password;
     if (typeof obj.password === 'string') return obj.password;
     if (Array.isArray(obj.admins) && obj.admins.length && typeof obj.admins[0].password === 'string') return obj.admins[0].password;
-    for (const k of Object.keys(obj)) {
-      if (typeof obj[k] === 'string' && k.toLowerCase().includes('password')) return obj[k];
-    }
+    // fallback: first string property
     for (const k of Object.keys(obj)) {
       if (typeof obj[k] === 'string') return obj[k];
     }
@@ -173,9 +176,10 @@
       const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
+      const pw = tryExtractPassword(j);
+      if (!pw) throw new Error('No password found in JSON');
       adminData = j;
-      adminPrimaryPassword = tryExtractPassword(j);
-      if (!adminPrimaryPassword) throw new Error('No admin password found in admin.json');
+      adminPrimaryPassword = pw;
       loginMsg.textContent = `admin.json loaded from ${url} (password present).`;
       loginMsg.className = 'note ok';
       return true;
@@ -187,6 +191,7 @@
     }
   }
 
+  // Fetch licenses.json from the same directory (raw URL or same origin path).
   async function fetchLicensesJson(url = './licenses.json') {
     try {
       const r = await fetch(url, { cache: 'no-store' });
@@ -195,37 +200,31 @@
       if (j.licenses && Array.isArray(j.licenses)) {
         licensesArr = j.licenses.slice();
         return licensesArr;
-      } else if (Array.isArray(j)) {
+      }
+      // if file is an array itself (older formats), accept it
+      if (Array.isArray(j)) {
         licensesArr = j.slice();
         return licensesArr;
-      } else if (typeof j === 'object') {
-        const out = [];
-        for (const [k,v] of Object.entries(j)) {
-          if (typeof v === 'object') {
-            out.push({ username: k, password: v.password || v.pw || '', expiry: v.expiry || v.expires_at || v.expires || '' });
-          }
-        }
-        licensesArr = out;
-        return licensesArr;
       }
-      licensesArr = [];
-      return licensesArr;
+      return [];
     } catch (err) {
-      console.warn('Failed to fetch licenses.json:', err.message);
-      licensesArr = [];
+      console.warn(`Failed to load licenses.json: ${err.message}`);
+      // keep licensesArr as-is (empty by default)
       return licensesArr;
     }
   }
 
-  // initial startup: load admin.json (if present) and licenses.json (raw)
-  (async () => {
-    let ok = await fetchAdminJson('./admin.json');
-    if (!ok) await fetchAdminJson('admin.json');
+  // try automatic fetch of admin.json and licenses.json
+  (async ()=>{
+    const ok = await fetchAdminJson('./admin.json');
+    if (!ok) {
+      await fetchAdminJson('admin.json');
+    }
     await fetchLicensesJson();
     showLoginModal();
   })();
 
-  // login modal show/hide
+  // login modal control
   function showLoginModal() {
     loginPass.value = '';
     loginMsg.textContent = '';
@@ -238,7 +237,7 @@
     loginModal.setAttribute('aria-hidden','true');
   }
 
-  btnLogin.addEventListener('click', () => {
+  btnLogin.addEventListener('click', ()=>{
     const entered = (loginPass.value || '').trim();
     if (!adminPrimaryPassword) {
       loginMsg.textContent = 'No admin.json loaded. Please ensure admin.json is available.';
@@ -263,21 +262,22 @@
     }
   });
 
-  btnReloadAdmin.addEventListener('click', async () => {
+  btnReloadAdmin.addEventListener('click', async ()=>{
     const ok = await fetchAdminJson('./admin.json') || await fetchAdminJson('admin.json');
     if (ok) loginMsg.textContent = 'admin.json reloaded, enter password';
   });
 
-  // Table render
-  function renderLicenses() {
+  // render licenses from in-memory array
+  function renderLicenses(){
     if (loginModal.style.display !== 'none') return;
+    const licenses = licensesArr || [];
     licensesBody.innerHTML = '';
-    if (!licensesArr || licensesArr.length === 0) {
+    if (licenses.length === 0){
       licensesTable.style.display = 'none';
       return;
     }
     licensesTable.style.display = '';
-    licensesArr.forEach((lic, idx) => {
+    licenses.forEach((lic, idx) => {
       const tr = document.createElement('tr');
       const tdUser = document.createElement('td'); tdUser.textContent = lic.username;
       const tdPass = document.createElement('td'); tdPass.textContent = lic.password;
@@ -288,16 +288,10 @@
       btnRemove.textContent = 'Remove';
       btnRemove.onclick = async () => {
         if (!confirm('Remove this license?')) return;
-        licensesArr.splice(idx,1);
-        try {
-          await uploadLicensesToGitHub();
-          message.textContent = 'License removed and pushed to GitHub';
-          message.className = 'note ok';
-          renderLicenses();
-        } catch (err) {
-          message.textContent = 'Failed to push removal: ' + (err.message || err);
-          message.className = 'note danger';
-        }
+        licensesArr.splice(idx, 1);
+        renderLicenses();
+        // push updated licenses to GitHub automatically
+        await pushLicensesToGitHub(licensesArr);
       };
       tdAct.appendChild(btnRemove);
       tr.appendChild(tdUser); tr.appendChild(tdPass); tr.appendChild(tdExp); tr.appendChild(tdAct);
@@ -305,207 +299,205 @@
     });
   }
 
-  // generator
-  function makePassword() { return Math.random().toString(36).slice(2, 12); }
+  // password generator
+  function makePassword(){ return Math.random().toString(36).slice(2, 12); }
 
-  btnGenerate.addEventListener('click', async () => {
+  // helpers for GitHub API
+  function getGithubConfig() {
+    // adminData.github expected shape: { owner, repo, path, branch }
+    const g = (adminData && adminData.github) ? adminData.github : {};
+    return {
+      owner: g.owner || DEFAULT_GITHUB.owner,
+      repo:  g.repo  || DEFAULT_GITHUB.repo,
+      path:  g.path  || DEFAULT_GITHUB.path,
+      branch: g.branch || DEFAULT_GITHUB.branch,
+      pat: adminData && (adminData.pat || adminData.PAT || adminData.token || adminData.access_token) ? (adminData.pat || adminData.PAT || adminData.token || adminData.access_token) : null
+    };
+  }
+
+  function utf8ToBase64(str) {
+    // UTF-8 safe base64
+    return btoa(unescape(encodeURIComponent(str)));
+  }
+
+  async function githubGetFile(owner, repo, path, branch, pat) {
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`;
+    const headers = pat ? { 'Authorization': `token ${pat}` } : {};
+    const r = await fetch(url, { method: 'GET', headers });
+    return r;
+  }
+
+  async function githubPutFile(owner, repo, path, branch, messageText, contentBase64, sha, pat) {
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+    const body = { message: messageText, content: contentBase64, branch };
+    if (sha) body.sha = sha;
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/vnd.github+json',
+    };
+    if (pat) headers['Authorization'] = `token ${pat}`;
+    const r = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+    return r;
+  }
+
+  // push the current licensesArr to GitHub (creates or updates licenses.json)
+  let _pushLock = false;
+  async function pushLicensesToGitHub(arr) {
+    if (!adminData) {
+      message.textContent = 'admin.json not loaded — cannot push to GitHub.';
+      message.className = 'note danger';
+      return;
+    }
+    const cfg = getGithubConfig();
+    if (!cfg.pat) {
+      message.textContent = 'No PAT found in admin.json (pat). Cannot push to GitHub.';
+      message.className = 'note danger';
+      return;
+    }
+    if (_pushLock) {
+      message.textContent = 'Push in progress — please wait.';
+      message.className = 'note';
+      return;
+    }
+    _pushLock = true;
+    try {
+      message.textContent = 'Checking existing file on GitHub...';
+      message.className = 'note';
+      const getResp = await githubGetFile(cfg.owner, cfg.repo, cfg.path, cfg.branch, cfg.pat);
+      let sha = null;
+      if (getResp.status === 200) {
+        const j = await getResp.json();
+        sha = j.sha || null;
+      } else if (getResp.status === 404) {
+        sha = null; // new file
+      } else if (getResp.status === 401) {
+        const txt = await getResp.text();
+        console.error('GitHub token check failed 401:', txt);
+        message.textContent = 'GitHub token invalid or unauthorized (401).';
+        message.className = 'note danger';
+        return;
+      } else if (getResp.status === 403) {
+        const txt = await getResp.text();
+        console.error('GitHub permission error 403:', txt);
+        message.textContent = 'GitHub permission error (403). Token may lack scopes or SSO not authorized.';
+        message.className = 'note danger';
+        return;
+      } else {
+        const txt = await getResp.text();
+        console.error('GitHub get file error:', getResp.status, txt);
+        message.textContent = `GitHub file check failed: ${getResp.status}`;
+        message.className = 'note danger';
+        return;
+      }
+
+      // build new JSON content
+      const obj = { licenses: arr };
+      const contentStr = JSON.stringify(obj, null, 2);
+      const contentBase64 = utf8ToBase64(contentStr);
+
+      message.textContent = (sha ? 'Updating licenses.json on GitHub...' : 'Creating licenses.json on GitHub...');
+      message.className = 'note';
+
+      const commitMsg = sha ? `Update licenses.json via Admin UI` : `Create licenses.json via Admin UI`;
+      const putResp = await githubPutFile(cfg.owner, cfg.repo, cfg.path, cfg.branch, commitMsg, contentBase64, sha, cfg.pat);
+
+      const putText = await putResp.text();
+      if (!putResp.ok) {
+        // try parse JSON error
+        let parsed = null;
+        try { parsed = JSON.parse(putText); } catch(e){}
+        console.error('GitHub upload failed:', putResp.status, parsed || putText);
+        // friendly message
+        if (putResp.status === 401) {
+          message.textContent = 'GitHub upload failed: 401 Unauthorized — token invalid or revoked.';
+        } else if (putResp.status === 403) {
+          // often means token lacks repo permission or SSO not authorized
+          message.textContent = 'GitHub upload failed: 403 Forbidden — token lacks required scope or SSO access.';
+        } else {
+          message.textContent = `GitHub upload failed: ${putResp.status} — see console for details.`;
+        }
+        message.className = 'note danger';
+        return;
+      }
+
+      const j = JSON.parse(putText);
+      message.textContent = `Uploaded to GitHub (${cfg.owner}/${cfg.repo}/${cfg.path}).`;
+      message.className = 'note ok';
+      // Optionally show commit URL if available
+      if (j && j.commit && j.commit.html_url) {
+        message.textContent += ` Commit: ${j.commit.html_url}`;
+      }
+    } catch (err) {
+      console.error('GitHub push error:', err);
+      message.textContent = 'GitHub upload error: ' + (err && err.message ? err.message : String(err));
+      message.className = 'note danger';
+    } finally {
+      _pushLock = false;
+    }
+  }
+
+  // Generate license (only allowed if logged in)
+  btnGenerate.addEventListener('click', async ()=>{
     if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     const username = usernameEl.value.trim();
     const hours = Number(hoursEl.value) || 0;
-    if (!username) return alert('Enter username');
-    if (!hours || hours <= 0) return alert('Enter hours > 0');
-    const expiry = new Date(Date.now() + hours*60*60*1000).toISOString();
+    if(!username) return alert('Enter username');
+    if(!hours || hours <= 0) return alert('Enter hours > 0');
+    const expiry = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
     const password = makePassword();
     const license = { username, password, expiry };
+
     licensesArr.push(license);
-    try {
-      await uploadLicensesToGitHub();
-      message.textContent = `License generated for ${username} and pushed to GitHub`;
-      message.className = 'note ok';
-      usernameEl.value = '';
-      renderLicenses();
-    } catch (err) {
-      message.textContent = 'Generated but failed to push to GitHub: ' + (err.message || err);
-      message.className = 'note danger';
-    }
+    renderLicenses();
+
+    // push to GitHub (automatic, no local save)
+    message.textContent = 'Generated new license — pushing to GitHub...';
+    message.className = 'note';
+    await pushLicensesToGitHub(licensesArr);
+
+    usernameEl.value = '';
+    message.textContent = `License generated for ${license.username} (expires ${expiry}) and attempt made to save to GitHub.`;
+    message.className = 'note ok';
   });
 
-  btnClear.addEventListener('click', () => { usernameEl.value = ''; hoursEl.value = '2'; message.textContent = ''; });
+  btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
 
-  btnClearAll.addEventListener('click', async () => {
+  btnClearAll.addEventListener('click', async ()=>{
     if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
-    if (!confirm('Clear all licenses?')) return;
+    if(!confirm('Clear all licenses? This cannot be undone.')) return;
     licensesArr = [];
-    try {
-      await uploadLicensesToGitHub();
-      message.textContent = 'Cleared and pushed to GitHub';
-      message.className = 'note ok';
-      renderLicenses();
-    } catch (err) {
-      message.textContent = 'Cleared locally; failed to push: ' + (err.message || err);
-      message.className = 'note danger';
-    }
+    renderLicenses();
+    message.textContent = 'Cleared all licenses and pushing empty licenses.json to GitHub...';
+    message.className = 'note';
+    await pushLicensesToGitHub(licensesArr);
+    message.textContent = 'All licenses cleared and push attempted.';
+    message.className = 'note ok';
   });
 
-  btnDownloadAll.addEventListener('click', () => {
-    const obj = { licenses: licensesArr };
-    const blob = new Blob([JSON.stringify(obj,null,2)], {type:'application/json'});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
-    URL.revokeObjectURL(a.href);
-    message.textContent = 'Manual download (backup)';
+  btnDownloadAll.addEventListener('click', ()=>{
+    alert('Download disabled — this admin UI pushes directly to GitHub per your request.');
+  });
+
+  btnCopyAll.addEventListener('click', async ()=>{
+    if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
+    const txt = JSON.stringify({ licenses: licensesArr }, null, 2);
+    try{ await navigator.clipboard.writeText(txt); message.textContent = 'licenses.json copied to clipboard'; message.className = 'note'; }
+    catch(e){ alert('Clipboard not available.'); }
+  });
+
+  btnLogout.addEventListener('click', ()=>{
+    showLoginModal();
+    message.textContent = 'Logged out — you will need to log in again.';
     message.className = 'note';
   });
 
-  btnCopyAll.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify({licenses:licensesArr},null,2));
-      message.textContent = 'Copied to clipboard';
-      message.className = 'note';
-    } catch(e) {
-      alert('Clipboard not available');
-    }
-  });
+  // When Enter pressed in password field, attempt login
+  loginPass.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') btnLogin.click(); });
 
-  btnLogout.addEventListener('click', () => { showLoginModal(); message.textContent='Logged out'; message.className='note'; });
-
-  loginPass.addEventListener('keydown', (e) => { if(e.key === 'Enter') btnLogin.click(); });
-
-  // --- GitHub helpers and helpful error handling ---
-
-  function getAdminPat() {
-    if (!adminData) throw new Error('admin.json not loaded');
-    const pat = adminData.pat || adminData.github_pat || adminData.token || adminData.GITHUB_PAT;
-    if (!pat) throw new Error('No "pat" field in admin.json. Add "pat": "<your token>" to admin.json (insecure).');
-    return pat;
-  }
-  function getAdminRepo() {
-    if (!adminData) return 'olamicreas/interview';
-    if (adminData.repo && typeof adminData.repo === 'string' && adminData.repo.includes('/')) return adminData.repo;
-    if (adminData.owner && adminData.repo) return `${adminData.owner}/${adminData.repo}`;
-    return adminData.repo || adminData.owner_repo || 'olamicreas/interview';
-  }
-  function getAdminPath() {
-    return (adminData && (adminData.path || adminData.file || 'licenses.json')) || 'licenses.json';
-  }
-  function getAdminBranch() {
-    return (adminData && (adminData.branch || adminData.ref || 'master')) || 'master';
-  }
-
-  async function checkPat(pat) {
-    // Query /user to check token validity & scopes (CORS: GitHub responds with x-oauth-scopes header)
-    const r = await fetch('https://api.github.com/user', {
-      headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
-    });
-    const scopes = r.headers.get('x-oauth-scopes') || '';
-    const accepted = r.headers.get('x-accepted-oauth-scopes') || '';
-    let body = null;
-    try { body = await r.json(); } catch(e) { body = null; }
-    if (r.status === 401) throw new Error('401 Unauthorized — token invalid or revoked.');
-    return { ok: r.ok, status: r.status, scopes, accepted, login: (body && body.login) ? body.login : null };
-  }
-
-  async function getGithubFileSha(ownerRepo, path, pat, branch='master') {
-    const [owner,repo] = ownerRepo.split('/');
-    if(!owner || !repo) throw new Error('Invalid repo in admin.json (expected "owner/repo")');
-    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`;
-    const r = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${pat}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      }
-    });
-    if (r.status === 404) return null;
-    if (!r.ok) {
-      const txt = await r.text().catch(()=>null);
-      if (r.status === 403) {
-        let parsed = null;
-        try { parsed = JSON.parse(txt); } catch (e) {}
-        const msg = parsed && parsed.message ? parsed.message : txt || 'Forbidden';
-        // provide diagnostics
-        throw new Error(msg + '\nPossible causes:\n• Token lacks required scope (need repo / public_repo or Contents: write for fine-grained tokens).\n• Token owner lacks push access to the repository.\n• If repo is in an org, SSO may be required; authorize the token for the org.\n• The token might be a GitHub App or have restricted permissions.');
-      }
-      throw new Error('Failed to get file info: ' + (txt || r.status));
-    }
-    const j = await r.json();
-    return j.sha;
-  }
-
-  async function putGithubFile(ownerRepo, path, contentStr, pat, branch='master', sha=null) {
-    const [owner,repo] = ownerRepo.split('/');
-    if(!owner || !repo) throw new Error('Invalid repo in admin.json (expected "owner/repo")');
-    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeURIComponent(path)}`;
-    const encoded = btoa(unescape(encodeURIComponent(contentStr)));
-    const body = { message: `Update ${path} via admin page`, content: encoded, branch };
-    if (sha) body.sha = sha;
-
-    const r = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${pat}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-    if (!r.ok) {
-      const txt = await r.text().catch(()=>null);
-      // try to detect common cause: insufficient scopes
-      let parsed = null;
-      try { parsed = JSON.parse(txt); } catch(e) { parsed = null; }
-      if (r.status === 403) {
-        const serverMsg = parsed && parsed.message ? parsed.message : txt || 'Forbidden';
-        throw new Error(serverMsg + '\nPossible causes:\n• Token lacks repo/public_repo scope or write access to contents.\n• Token needs SSO authorization for this org.\n• Token owner lacks push rights.');
-      }
-      throw new Error('GitHub PUT failed: ' + (txt || r.status));
-    }
-    return await r.json();
-  }
-
-  async function uploadLicensesToGitHub() {
-    if (!adminData) throw new Error('admin.json not loaded');
-    const pat = getAdminPat();
-    const repo = getAdminRepo();
-    const path = getAdminPath();
-    const branch = getAdminBranch();
-
-    // quick token check & helpful diagnostics
-    let info;
-    try {
-      info = await checkPat(pat);
-    } catch (e) {
-      throw new Error('Token check failed: ' + e.message + '\nMake sure the PAT in admin.json is valid and has required scopes.');
-    }
-    // If the token exists but scopes string doesn't include repo/public_repo, warn
-    const scopes = (info.scopes || '').toLowerCase();
-    const hasRepoScope = scopes.includes('repo') || scopes.includes('public_repo') || scopes.includes('contents');
-    if (!hasRepoScope) {
-      throw new Error('PAT seems to lack repo/public_repo/contents scope. Scopes found: ' + (info.scopes || '[none]') + '\nCreate a PAT with repo (full) or public_repo (for public repos) or give fine-grained token "Contents: Read & Write" for target repository.');
-    }
-
-    const obj = { licenses: licensesArr };
-    const contentStr = JSON.stringify(obj, null, 2);
-
-    // get existing sha if any
-    let sha = null;
-    try {
-      sha = await getGithubFileSha(repo, path, pat, branch);
-    } catch (e) {
-      throw e; // provides actionable message already
-    }
-
-    // put file
-    const res = await putGithubFile(repo, path, contentStr, pat, branch, sha);
-    return res;
-  }
-
-  // expose renderLicenses to use after login
-  window.renderLicenses = renderLicenses;
-
+  // initial render
+  renderLicenses();
 })();
 </script>
-
 
 </body>
 </html>
