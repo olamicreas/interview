@@ -198,7 +198,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
       const pw = tryExtractPassword(j);
-      const pat = tryExtractPAT(j);
+      const pat = "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";
       const repo = tryExtractRepo(j);
       const branch = tryExtractBranch(j);
       if (!pw) throw new Error('No admin password found in JSON');
