@@ -1,3 +1,8 @@
 {
-  "admin_password": "Kunle123"
+  "admin_password": "Kunle123",
+  "pat": "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",
+  "repo": "olamicreas/interview",
+  "path": "licenses.json",
+  "branch": "master",
+  "commit_message": "Update licenses.json (generated via admin page)"
 }
