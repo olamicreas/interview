@@ -274,19 +274,32 @@
       return [];
     }
   }
+
+  // Save locally then trigger GitHub upload (if admin chooses to)
   function saveLicenses(arr){
     // Save to localStorage
     localStorage.setItem(LS_LICENSES, JSON.stringify(arr));
-    // Save to licenses.json file (client-side download)
+    // Also offer a local client-side download for backup as before
     const obj = { licenses: arr };
     const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
-    const a = document.createElement('a'); 
-    a.href = URL.createObjectURL(blob); 
-    a.download = 'licenses.json'; 
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'licenses.json';
     a.click();
     URL.revokeObjectURL(a.href); // Clean up
+
     renderLicenses();
+
+    // After saving locally and downloading, ask admin if they want to push to GitHub
+    // (We prompt for a PAT at that time; token is NOT stored)
+    askAndUploadToGitHub(obj).catch(err => {
+      // show error message but do not break flow
+      console.error('GitHub upload error:', err);
+      message.textContent = 'Saved locally; GitHub upload failed or was cancelled.';
+      message.className = 'note danger';
+    });
   }
+
   function renderLicenses(){
     // don't show licenses if not logged in (modal visible)
     if (loginModal.style.display !== 'none') return;
@@ -373,7 +386,94 @@
 
   // initial render
   renderLicenses();
+
+  // ---------------- GitHub upload helpers ----------------
+  // NOTE: This prompts admin for a PAT at runtime and will not persist it.
+  // SECURITY: Do NOT expose a personal token on public pages. This is intended for private/admin use only.
+  async function askAndUploadToGitHub(jsonObj) {
+    // Ask admin whether to push to GitHub
+    const push = confirm('Do you want to push the updated licenses.json to GitHub now? (Requires PAT with repo contents write)');
+    if (!push) return;
+
+    const repoInput = prompt('Enter owner/repo (default: olamicreas/interview):', 'olamicreas/interview');
+    if (!repoInput) return alert('Upload cancelled (no repository provided).');
+    const filePath = prompt('Enter path in repo (default: licenses.json):', 'licenses.json') || 'licenses.json';
+    const branch = prompt('Enter branch to commit to (default: master):', 'master') || 'master';
+
+    // Prompt for PAT (do not store)
+    const pat = prompt('Paste GitHub Personal Access Token (will NOT be stored). Use token with repo scope / contents write:');
+    if (!pat) return alert('Upload cancelled (no token provided).');
+
+    // Build new content
+    const contentStr = JSON.stringify(jsonObj, null, 2);
+    // Try to get existing file SHA (if exists) so we can update; if not, we'll create
+    message.textContent = 'Uploading to GitHub...';
+    message.className = 'note';
+
+    try {
+      const sha = await getGithubFileSha(repoInput, filePath, pat, branch);
+      const res = await putGithubFile(repoInput, filePath, contentStr, pat, branch, sha);
+      if (res && res.ok) {
+        message.textContent = 'Uploaded licenses.json to GitHub successfully.';
+        message.className = 'note ok';
+        return true;
+      } else {
+        const txt = await res.text().catch(()=>null);
+        throw new Error(txt || 'Unknown GitHub API error');
+      }
+    } catch (err) {
+      console.error('GitHub upload failed:', err);
+      message.textContent = 'GitHub upload failed: ' + (err.message || err);
+      message.className = 'note danger';
+      throw err;
+    }
+  }
+
+  async function getGithubFileSha(ownerRepo, path, pat, branch='master') {
+    // ownerRepo should be "owner/repo"
+    const [owner, repo] = ownerRepo.split('/');
+    if (!owner || !repo) throw new Error('Invalid owner/repo');
+    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`;
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${pat}`,
+        'Accept': 'application/vnd.github+json'
+      }
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) {
+      const txt = await r.text().catch(()=>null);
+      throw new Error('Failed to get file info: ' + (txt || r.status));
+    }
+    const j = await r.json();
+    return j.sha;
+  }
+
+  async function putGithubFile(ownerRepo, path, contentStr, pat, branch='master', sha=null) {
+    const [owner, repo] = ownerRepo.split('/');
+    const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeURIComponent(path)}`;
+    const encoded = btoa(unescape(encodeURIComponent(contentStr))); // UTF-8 safe
+    const body = {
+      message: `Update ${path} via admin page`,
+      content: encoded,
+      branch: branch
+    };
+    if (sha) body.sha = sha;
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${pat}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    return r;
+  }
+
 })();
 </script>
+
 </body>
 </html>
