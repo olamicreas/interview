@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Interview Assistant — Practice interviews, faster</title>
+
+  <!-- Optional: swap font-family to match your brand -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    :root{
+      --bg: #0f1724;
+      --card: #0b1220;
+      --muted: #98a0b3;
+      --accent: linear-gradient(90deg,#5eead4,#60a5fa);
+      --glass: rgba(255,255,255,0.03);
+      --glass-2: rgba(255,255,255,0.02);
+      --radius: 14px;
+      --max-width: 1100px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      background: radial-gradient(1000px 500px at 10% 10%, rgba(96,165,250,0.06), transparent),
+                  radial-gradient(900px 400px at 90% 80%, rgba(94,234,212,0.03), transparent),
+                  var(--bg);
+      color:#e6eef8;
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
+      padding:28px;
+      display:flex;
+      justify-content:center;
+    }
+
+    .container{
+      width:100%;
+      max-width:var(--max-width);
+    }
+
+    header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+      margin-bottom:28px;
+    }
+
+    .brand{
+      display:flex;
+      gap:12px;
+      align-items:center;
+      text-decoration:none;
+      color:inherit;
+    }
+    .logo{
+      width:44px; height:44px; border-radius:10px;
+      background:linear-gradient(135deg,#60a5fa,#5eead4);
+      display:grid; place-items:center; box-shadow: 0 6px 18px rgba(15,23,36,0.6);
+      font-weight:700; color:#012; font-size:18px;
+    }
+    nav{display:flex; gap:16px; align-items:center;}
+    nav a{color:var(--muted); text-decoration:none; font-weight:600; padding:8px 12px; border-radius:10px;}
+    nav a:hover{color:#fff; background:var(--glass-2)}
+
+    /* hero */
+    .hero{
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+      border-radius: var(--radius);
+      padding:28px;
+      display:grid;
+      grid-template-columns: 1fr;
+      gap:18px;
+      align-items:center;
+      box-shadow: 0 8px 40px rgba(2,6,23,0.6);
+    }
+
+    .hero-grid{display:grid; grid-template-columns: 1fr; gap:16px;}
+    .title{
+      font-size: clamp(24px, 4.2vw, 34px);
+      line-height:1.02;
+      margin:0 0 6px 0;
+      font-weight:700;
+      color:#eaf6ff;
+    }
+    .subtitle{
+      margin:0; color:var(--muted); font-size:15px;
+    }
+
+    .cta-row{
+      display:flex; gap:12px; flex-wrap:wrap; margin-top:6px;
+    }
+    .btn{
+      display:inline-flex; gap:10px; align-items:center; padding:12px 18px;
+      border-radius:12px; text-decoration:none; font-weight:700; color:#012;
+      background:var(--accent); box-shadow: 0 8px 20px rgba(2,6,23,0.4);
+    }
+    .btn.ghost{
+      background:transparent; color:var(--muted); border:1px solid rgba(255,255,255,0.04);
+    }
+
+    .feature-cards{
+      display:grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px,1fr));
+      gap:12px;
+      margin-top:12px;
+    }
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,0.018), transparent);
+      padding:14px; border-radius:12px; min-height:86px;
+      display:flex; gap:12px; align-items:flex-start;
+      border: 1px solid rgba(255,255,255,0.02);
+    }
+    .card svg{width:36px; height:36px; flex:0 0 36px; opacity:0.95}
+    .card h4{margin:0; font-size:15px; color:#eaf6ff}
+    .card p{margin:4px 0 0 0; color:var(--muted); font-size:13px}
+
+    /* sections */
+    section { margin-top:18px; }
+
+    .how{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap:14px;
+    }
+    @media(min-width:860px){
+      .hero-grid{grid-template-columns: 1fr 420px;}
+      .how{grid-template-columns:1fr 360px}
+    }
+
+    .card-panel{
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+      padding:14px; border-radius:12px; border:1px solid rgba(255,255,255,0.02);
+    }
+
+    footer{
+      margin-top:22px; color:var(--muted); display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
+    }
+    .small{font-size:13px}
+
+    /* subtle hf animations */
+    .pulse { animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%{transform:translateY(0)}50%{transform:translateY(-4px)}100%{transform:translateY(0)}}
+
+    /* quick utility */
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <a class="brand" href="index.html">
+        <div class="logo">IA</div>
+        <div>
+          <div style="font-weight:700">Interview Assistant</div>
+          <div style="font-size:12px;color:var(--muted)">Practice interviews with push-to-talk speed</div>
+        </div>
+      </a>
+
+      <nav aria-label="Main navigation">
+        <a href="index.html">Home</a>
+        <a href="download.html">Download</a>
+       
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <h1 class="title">Practice interviews — instantly, with push-to-talk speed</h1>
+            <p class="subtitle">Hold SHIFT or tap & hold the button to speak a question. The app trims silence aggressively, transcribes, and produces concise STAR-style answers you can practice out loud.</p>
+
+            <div class="cta-row">
+              <a class="btn" href="download.html" aria-label="Go to downloads">⬇️ Download</a>
+              <a class="btn ghost" href="#how-it-works" aria-label="How it works">How it works</a>
+             
+            </div>
+
+            <div class="feature-cards" style="margin-top:14px">
+              <div class="card">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden><path d="M12 2v8" stroke="#60a5fa" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="16" r="5" stroke="#5eead4" stroke-width="1.6" fill="transparent"/></svg>
+                <div>
+                  <h4>Fast responses</h4>
+                  <p>Shorter LLM outputs, trimmed audio — answers appear quickly.</p>
+                </div>
+              </div>
+
+              <div class="card">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden><path d="M12 3v4" stroke="#5eead4" stroke-width="1.6" stroke-linecap="round"/><path d="M5 21v-6a7 7 0 0 1 14 0v6" stroke="#60a5fa" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div>
+                  <h4>Privacy-conscious</h4>
+                  <p>Local trimming & streamlined uploads minimize audio sent to the cloud.</p>
+                </div>
+              </div>
+
+              <div class="card">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden><rect x="3" y="3" width="18" height="18" rx="3" stroke="#60a5fa" stroke-width="1.6"/><path d="M8 12h8" stroke="#5eead4" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <div>
+                  <h4>Cross-platform</h4>
+                  <p>Packages for Windows and macOS — ready to distribute (admin-controlled access).</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="card-panel">
+            <h3 style="margin:0 0 8px 0">Quick start</h3>
+            <ol style="margin:0 0 10px 18px; color:var(--muted);">
+              <li>Download the app for your platform.</li>
+              <li>Launch and log in with the license/password from your admin.</li>
+              <li>Hold SHIFT (or press-and-hold) to record a question. Release to get a STAR-style answer.</li>
+            </ol>
+            <div style="display:flex; gap:10px; margin-top:8px;">
+              <a class="btn" href="download.html">Get the app</a>
+              <a class="btn ghost" href="#features">Learn more</a>
+            </div>
+          </aside>
+        </div>
+
+        <!-- small extra row if needed -->
+      </section>
+
+      <section id="how-it-works" style="margin-top:18px">
+        <div style="display:flex;flex-direction:column; gap:12px;">
+          <h2 style="margin:0 0 6px 0">How it works</h2>
+          <p class="muted" style="margin:0 0 8px 0">Designed for quick iteration: you speak a question, the app trims silence, uploads a compressed audio clip, Whisper transcribes it, and the LLM returns a concise STAR-style answer optimized for spoken use.</p>
+
+          <div class="how">
+            <div class="card-panel">
+              <h4 style="margin-top:0">1 — Capture & trim</h4>
+              <p class="muted">Hold Shift or the on-screen button. The recorder captures raw PCM and uses VAD to trim silence aggressively.</p>
+            </div>
+            <div class="card-panel">
+              <h4 style="margin-top:0">2 — Whisper & LLM</h4>
+              <p class="muted">Audio is encoded (Opus/WebM if ffmpeg found) and sent for transcription, then the LLM returns a short STAR-format answer.</p>
+            </div>
+            <div class="card-panel">
+              <h4 style="margin-top:0">3 — Practice</h4>
+              <p class="muted">The final answer is shown in the UI — read it out loud and iterate until you're comfortable.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <div class="small muted">© <span id="year"></span> Interview Assistant — Built for fast interview practice</div>
+        <div class="small muted">Requires a valid login/password from your admin</div>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // small touches
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    // Smooth scroll for anchors
+    document.querySelectorAll('a[href^="#"]').forEach(a=>{
+      a.addEventListener('click', (e)=>{
+        const id = a.getAttribute('href').slice(1);
+        const el = document.getElementById(id);
+        if(el){ e.preventDefault(); el.scrollIntoView({behavior:'smooth', block:'start'}); }
+      });
+    });
+  </script>
+</body>
+</html>

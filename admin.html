@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Admin — License Generator</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b1220; --card:#071425; --muted:#9fb2d0; --accent:#60a5fa;
+    --radius:12px; --glass: rgba(255,255,255,0.02);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; background:linear-gradient(180deg,#051028,#071425);
+    color:#eaf6ff; padding:28px; display:flex; justify-content:center;
+  }
+  .wrap{width:100%; max-width:980px}
+  header{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px}
+  .brand{display:flex; gap:12px; align-items:center; color:inherit; text-decoration:none}
+  .logo{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#60a5fa,#5eead4);display:grid;place-items:center;font-weight:700;color:#012}
+  h1{margin:0; font-size:20px}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent); padding:18px; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.03)}
+  .grid{display:grid; gap:14px; margin-top:14px}
+  @media(min-width:860px){ .grid{grid-template-columns: 1fr 360px} }
+
+  label{display:block; font-size:13px; color:var(--muted); margin-bottom:6px}
+  input, select, button { width:100%; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,0.03); background:transparent; color:inherit; }
+  input::placeholder{color:rgba(255,255,255,0.35)}
+  .row{display:flex; gap:10px}
+  .row > *{flex:1}
+  .small{font-size:13px; color:var(--muted)}
+  .table{width:100%; margin-top:12px; border-collapse:collapse}
+  .table th, .table td{padding:8px 10px; text-align:left; border-bottom:1px solid rgba(255,255,255,0.02); font-size:13px}
+  .btn { display:inline-flex; gap:8px; align-items:center; padding:10px 12px; border-radius:10px; font-weight:700; cursor:pointer; border:none }
+  .btn-primary{ background:linear-gradient(90deg,#5eead4,#60a5fa); color:#022; }
+  .btn-ghost{ background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--muted) }
+  .muted{color:var(--muted)}
+  .note{font-size:13px; color:var(--muted); margin-top:8px}
+  .danger{color:#ff8b8b}
+  .ok{color:#bfffdc}
+  footer{margin-top:18px; color:var(--muted); font-size:13px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <a class="brand" href="index.html"><div class="logo">IA</div><div><div style="font-weight:700">Interview Assistant</div><div class="small muted">Admin — License Generator</div></div></a>
+      <div style="text-align:right">
+        <div class="small muted">Run locally — export licenses.json to GitHub</div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h2 style="margin:0 0 8px 0">Generate licenses</h2>
+
+        <!-- Admin login -->
+        <div id="loginBox">
+          <label>Admin password (set a new one or enter existing)</label>
+          <div class="row">
+            <input id="adminPassword" type="password" placeholder="Set / Enter admin password">
+            <button id="btnSetPass" class="btn btn-ghost" style="flex:0 0 120px">Save</button>
+          </div>
+          <div class="note">Password is stored locally in your browser (localStorage). The login prompt will show once per browser until you clear storage.</div>
+        </div>
+
+        <hr style="border:none;height:1px;background:rgba(255,255,255,0.02);margin:12px 0">
+
+        <div id="generateArea">
+          <label>Username</label>
+          <input id="username" placeholder="e.g. alice@example.com">
+
+          <div style="height:8px"></div>
+
+          <label>Hours valid</label>
+          <input id="hours" type="number" min="1" value="2">
+
+          <div style="height:8px"></div>
+
+          <div class="row" style="margin-top:8px;">
+            <button id="btnGenerate" class="btn btn-primary">Generate license</button>
+            <button id="btnClear" class="btn btn-ghost">Clear</button>
+          </div>
+
+          <div id="message" class="note"></div>
+
+          <table class="table" id="licensesTable" style="display:none; margin-top:12px">
+            <thead><tr><th>Username</th><th>Password</th><th>Expiry (UTC)</th><th>Actions</th></tr></thead>
+            <tbody id="licensesBody"></tbody>
+          </table>
+
+          <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="btnDownloadAll" class="btn btn-primary">Download licenses.json</button>
+            <button id="btnCopyAll" class="btn btn-ghost">Copy JSON</button>
+            <button id="btnClearAll" class="btn btn-ghost">Clear all</button>
+          </div>
+
+          <div class="note" style="margin-top:10px">
+            Each license is a JSON object `{ "username": "...", "password": "...", "expiry": "ISO" }`. You can combine them into a single `licenses.json` that your app will fetch from GitHub.
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <footer>
+      <div class="small muted">© <span id="year"></span> Interview Assistant — Admin</div>
+    </footer>
+  </div>
+
+<script>
+(() => {
+  const yearEl = document.getElementById('year'); yearEl.textContent = new Date().getFullYear();
+
+  // storage keys
+  const LS_ADMIN_PASS = 'ia_admin_pass_v1';
+  const LS_LICENSES = 'ia_licenses_v1';
+
+  // elements
+  const adminPassword = document.getElementById('adminPassword');
+  const btnSetPass = document.getElementById('btnSetPass');
+  const usernameEl = document.getElementById('username');
+  const hoursEl = document.getElementById('hours');
+  const btnGenerate = document.getElementById('btnGenerate');
+  const btnClear = document.getElementById('btnClear');
+  const btnDownloadAll = document.getElementById('btnDownloadAll');
+  const btnCopyAll = document.getElementById('btnCopyAll');
+  const btnClearAll = document.getElementById('btnClearAll');
+  const message = document.getElementById('message');
+
+  const licensesTable = document.getElementById('licensesTable');
+  const licensesBody = document.getElementById('licensesBody');
+
+  const ghOwner = document.getElementById('ghOwner');
+  const ghRepo = document.getElementById('ghRepo');
+  const ghPath = document.getElementById('ghPath');
+  const ghMessage = document.getElementById('ghMessage');
+  const ghToken = document.getElementById('ghToken');
+  const btnUpload = document.getElementById('btnUpload');
+  const btnPreview = document.getElementById('btnPreview');
+  const ghStatus = document.getElementById('ghStatus');
+
+  // load licenses from localStorage
+  function loadLicenses(){
+    try{
+      const raw = localStorage.getItem(LS_LICENSES);
+      if(!raw) return [];
+      return JSON.parse(raw);
+    }catch(e){
+      return [];
+    }
+  }
+  function saveLicenses(arr){
+    localStorage.setItem(LS_LICENSES, JSON.stringify(arr));
+    renderLicenses();
+  }
+
+  function renderLicenses(){
+    const licenses = loadLicenses();
+    licensesBody.innerHTML = '';
+    if(licenses.length === 0){
+      licensesTable.style.display = 'none';
+      return;
+    }
+    licensesTable.style.display = '';
+    licenses.forEach((lic, idx) => {
+      const tr = document.createElement('tr');
+      const tdUser = document.createElement('td'); tdUser.textContent = lic.username;
+      const tdPass = document.createElement('td'); tdPass.textContent = lic.password;
+      const tdExp = document.createElement('td'); tdExp.textContent = lic.expiry;
+      const tdAct = document.createElement('td');
+      const btnRemove = document.createElement('button');
+      btnRemove.className = 'btn btn-ghost';
+      btnRemove.textContent = 'Remove';
+      btnRemove.onclick = () => {
+        const arr = loadLicenses(); arr.splice(idx,1); saveLicenses(arr);
+      };
+      tdAct.appendChild(btnRemove);
+      tr.appendChild(tdUser); tr.appendChild(tdPass); tr.appendChild(tdExp); tr.appendChild(tdAct);
+      licensesBody.appendChild(tr);
+    });
+  }
+
+  // admin password saved in localStorage (not secure — only convenient for small local admin)
+  function setAdminPassword(pw){
+    if(!pw) { alert('Enter a password'); return; }
+    localStorage.setItem(LS_ADMIN_PASS, pw);
+    message.textContent = 'Admin password saved locally.';
+    message.className = 'note ok';
+  }
+  function checkAdminPassword(promptIfMissing=true){
+    const saved = localStorage.getItem(LS_ADMIN_PASS);
+    if(!saved){
+      if(promptIfMissing){
+        // if no admin password set, ask to set one via UI
+        message.textContent = 'Set an admin password to continue.';
+        message.className = 'note';
+      }
+      return false;
+    }
+    const entered = prompt('Admin password required to continue (enter password):');
+    if(entered === null) return false;
+    if(entered === saved) {
+      message.textContent = 'Admin confirmed.';
+      message.className = 'note ok';
+      return true;
+    }
+    alert('Incorrect admin password.');
+    return false;
+  }
+
+  // simple random password
+  function makePassword(){
+    // 10-char alnum
+    return Math.random().toString(36).slice(2, 12);
+  }
+
+  // license creation
+  btnGenerate.addEventListener('click', ()=>{
+    // require admin check
+    if(!checkAdminPassword(true)) return;
+    const username = usernameEl.value.trim();
+    const hours = Number(hoursEl.value) || 0;
+    if(!username) return alert('Enter username');
+    if(!hours || hours <= 0) return alert('Enter hours > 0');
+
+    const expiry = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+    const password = makePassword();
+    const license = { username, password, expiry };
+
+    const arr = loadLicenses();
+    arr.push(license);
+    saveLicenses(arr);
+
+    // clear input
+    usernameEl.value = '';
+    message.textContent = `License generated for ${license.username} (expires ${expiry})`;
+    message.className = 'note ok';
+  });
+
+  btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
+
+  btnClearAll.addEventListener('click', ()=>{
+    if(!checkAdminPassword(true)) return;
+    if(!confirm('Clear all licenses? This cannot be undone.')) return;
+    saveLicenses([]);
+    message.textContent = 'All licenses cleared.';
+    message.className = 'note';
+  });
+
+  // download combined json
+  function buildLicensesJSON(){
+    const arr = loadLicenses();
+    // you can structure licenses.json however you prefer. Default: an array of objects.
+    return { licenses: arr };
+  }
+
+  btnDownloadAll.addEventListener('click', ()=>{
+    if(!checkAdminPassword(true)) return;
+    const blob = new Blob([JSON.stringify(buildLicensesJSON(), null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
+    message.textContent = 'licenses.json downloaded';
+    message.className = 'note';
+  });
+
+  btnCopyAll.addEventListener('click', async ()=>{
+    if(!checkAdminPassword(true)) return;
+    const txt = JSON.stringify(buildLicensesJSON(), null, 2);
+    try{
+      await navigator.clipboard.writeText(txt);
+      message.textContent = 'licenses.json copied to clipboard';
+      message.className = 'note';
+    }catch(e){
+      alert('Clipboard not available. Use download instead.');
+    }
+  });
+
+  // GitHub upload helpers
+  async function getGitHubFileSha(owner, repo, path, token){
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if(r.status === 404) return null;
+    if(!r.ok) throw new Error('Failed to get file info: ' + (await r.text()));
+    const j = await r.json(); return j.sha;
+  }
+
+  async function uploadToGitHub({owner, repo, path, message, token, contentBase64, sha=null}){
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+    const body = { message, content: contentBase64, branch: undefined };
+    if(sha) body.sha = sha;
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' },
+      body: JSON.stringify(body)
+    });
+    return r;
+  }
+
+  btnPreview.addEventListener('click', ()=>{
+    const txt = JSON.stringify(buildLicensesJSON(), null, 2);
+    const w = window.open('', '_blank');
+    w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace;padding:12px">${escapeHtml(txt)}</pre>`);
+    w.document.title = 'licenses.json preview';
+  });
+
+  btnUpload.addEventListener('click', async ()=>{
+    if(!checkAdminPassword(true)) return;
+    const owner = ghOwner.value.trim();
+    const repo = ghRepo.value.trim();
+    const path = ghPath.value.trim() || 'licenses.json';
+    const messageText = ghMessage.value.trim() || 'Update licenses.json';
+    const token = ghToken.value.trim();
+    if(!owner || !repo || !token) return alert('Enter owner, repo and PAT token');
+
+    ghStatus.textContent = 'Preparing upload...'; ghStatus.className = 'note';
+    try{
+      const jsonObj = buildLicensesJSON();
+      const content = JSON.stringify(jsonObj, null, 2);
+      const contentBase64 = btoa(unescape(encodeURIComponent(content))); // utf-8 safe
+
+      // check existing file to get sha
+      ghStatus.textContent = 'Checking existing file...';
+      const sha = await (async ()=>{
+        try{
+          return await getGitHubFileSha(owner, repo, path, token);
+        }catch(e){
+          // throw visible error
+          throw new Error('Could not check file: ' + e.message);
+        }
+      })();
+
+      ghStatus.textContent = sha ? 'Updating file on GitHub...' : 'Creating file on GitHub...';
+      const resp = await uploadToGitHub({owner, repo, path, message: messageText, token, contentBase64, sha});
+      if(!resp.ok){
+        const text = await resp.text();
+        throw new Error('GitHub API error: ' + (text || resp.status));
+      }
+      const j = await resp.json();
+      ghStatus.textContent = 'Upload successful ✓';
+      ghStatus.className = 'note ok';
+      // return raw URL
+      const downloadUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/${path}`;
+      const msg = `Uploaded. Raw file URL (may require branch name adjustments): ${downloadUrl}`;
+      alert(msg);
+    }catch(err){
+      ghStatus.textContent = 'Upload failed: ' + err.message;
+      ghStatus.className = 'note danger';
+      console.error(err);
+      alert('Upload failed: ' + err.message);
+    }
+  });
+
+  // helper
+  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // Set password button
+  btnSetPass.addEventListener('click', ()=>{
+    const val = adminPassword.value.trim();
+    if(!val) return alert('Enter a password to save');
+    localStorage.setItem(LS_ADMIN_PASS, val);
+    adminPassword.value = '';
+    message.textContent = 'Admin password saved locally. You will be prompted once to confirm for actions.';
+    message.className = 'note ok';
+  });
+
+  // initial render
+  renderLicenses();
+
+  // If no admin password set, prompt the admin to choose one on first load (non-blocking)
+  if(!localStorage.getItem(LS_ADMIN_PASS)){
+    message.textContent = 'No admin password set — please set one to protect license generation.';
+    message.className = 'note';
+  }
+})();
+</script>
+</body>
+</html>
