@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Admin — License Generator (Login required)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b1220; --card:#071425; --muted:#9fb2d0; --accent:#60a5fa;
+    --radius:12px; --glass: rgba(255,255,255,0.02);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; background:linear-gradient(180deg,#051028,#071425);
+    color:#eaf6ff; padding:28px; display:flex; justify-content:center;
+  }
+  .wrap{width:100%; max-width:980px}
+  header{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px}
+  .brand{display:flex; gap:12px; align-items:center; color:inherit; text-decoration:none}
+  .logo{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#60a5fa,#5eead4);display:grid;place-items:center;font-weight:700;color:#012}
+  h1{margin:0; font-size:20px}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent); padding:18px; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.03)}
+  .grid{display:grid; gap:14px; margin-top:14px}
+  @media(min-width:860px){ .grid{grid-template-columns: 1fr 360px} }
+
+  label{display:block; font-size:13px; color:var(--muted); margin-bottom:6px}
+  input, select, button { width:100%; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,0.03); background:transparent; color:inherit; }
+  input::placeholder{color:rgba(255,255,255,0.35)}
+  .row{display:flex; gap:10px}
+  .row > *{flex:1}
+  .small{font-size:13px; color:var(--muted)}
+  .table{width:100%; margin-top:12px; border-collapse:collapse}
+  .table th, .table td{padding:8px 10px; text-align:left; border-bottom:1px solid rgba(255,255,255,0.02); font-size:13px}
+  .btn { display:inline-flex; gap:8px; align-items:center; padding:10px 12px; border-radius:10px; font-weight:700; cursor:pointer; border:none }
+  .btn-primary{ background:linear-gradient(90deg,#5eead4,#60a5fa); color:#022; }
+  .btn-ghost{ background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--muted) }
+  .muted{color:var(--muted)}
+  .note{font-size:13px; color:var(--muted); margin-top:8px}
+  .danger{color:#ff8b8b}
+  .ok{color:#bfffdc}
+  footer{margin-top:18px; color:var(--muted); font-size:13px}
+
+  /* login modal */
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(2,6,12,0.6); display:flex; align-items:center; justify-content:center; z-index:9999;
+  }
+  .modal{width:100%; max-width:420px; background:linear-gradient(180deg, rgba(255,255,255,0.03), transparent); padding:20px; border-radius:12px; border:1px solid rgba(255,255,255,0.04); text-align:left}
+  .modal h3{margin:0 0 10px 0}
+  .muted-block{color:var(--muted); font-size:13px; margin-bottom:8px}
+  .logout{cursor:pointer; text-decoration:underline; font-size:13px; color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <a class="brand" href="{{ url_for('home') }}"><div class="logo">IA</div><div><div style="font-weight:700">Interview Assistant</div><div class="small muted">Admin — License Generator</div></div></a>
+      <div style="text-align:right">
+        <div class="small muted">This page requires admin login on every access</div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h2 style="margin:0 0 8px 0">Generate licenses</h2>
+
+        <div id="controls">
+          <label>Username</label>
+          <input id="username" placeholder="e.g. alice@example.com">
+
+          <div style="height:8px"></div>
+
+          <label>Hours valid</label>
+          <input id="hours" type="number" min="1" value="2">
+
+          <div style="height:8px"></div>
+
+          <div class="row" style="margin-top:8px;">
+            <button id="btnGenerate" class="btn btn-primary">Generate license</button>
+            <button id="btnClear" class="btn btn-ghost">Clear</button>
+          </div>
+
+          <div id="message" class="note"></div>
+
+          <table class="table" id="licensesTable" style="display:none; margin-top:12px">
+            <thead><tr><th>Username</th><th>Password</th><th>Expiry (UTC)</th><th>Actions</th></tr></thead>
+            <tbody id="licensesBody"></tbody>
+          </table>
+
+          <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="btnDownloadAll" class="btn btn-primary">Download licenses.json</button>
+            <button id="btnCopyAll" class="btn btn-ghost">Copy JSON</button>
+            <button id="btnClearAll" class="btn btn-ghost">Clear all</button>
+            <button id="btnLogout" class="btn btn-ghost" title="End session">Logout</button>
+          </div>
+
+          <div class="note" style="margin-top:10px">
+            Licenses are now saved directly to the **licenses.json** file on the server.
+          </div>
+        </div>
+      </div>
+
+      <aside class="card" style="display:none"></aside>
+    </div>
+
+    <footer>
+      <div class="small muted">© <span id="year"></span> Interview Assistant — Admin</div>
+    </footer>
+  </div>
+
+  <div id="loginModal" class="modal-backdrop" style="display:none" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <h3 id="loginTitle">Admin login required</h3>
+      <div class="muted-block">Enter the admin password. (Loaded from `app.py` config.)</div>
+      <label for="loginPass">Password</label>
+      <input id="loginPass" type="password" placeholder="Admin password">
+      <div style="height:10px"></div>
+      <div class="row">
+        <button id="btnLogin" class="btn btn-primary">Log in</button>
+        </div>
+      <div id="loginMsg" class="note" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+<script>
+// The entire original JavaScript block is replaced with this Flask-compatible version.
+(() => {
+  const yearEl = document.getElementById('year'); yearEl.textContent = new Date().getFullYear();
+
+  // elements
+  const usernameEl = document.getElementById('username');
+  const hoursEl = document.getElementById('hours');
+  const btnGenerate = document.getElementById('btnGenerate');
+  const btnClear = document.getElementById('btnClear');
+  const btnDownloadAll = document.getElementById('btnDownloadAll');
+  const btnCopyAll = document.getElementById('btnCopyAll');
+  const btnClearAll = document.getElementById('btnClearAll');
+  const btnLogout = document.getElementById('btnLogout');
+  const message = document.getElementById('message');
+
+  const licensesTable = document.getElementById('licensesTable');
+  const licensesBody = document.getElementById('licensesBody');
+
+  const loginModal = document.getElementById('loginModal');
+  const loginPass = document.getElementById('loginPass');
+  const btnLogin = document.getElementById('btnLogin');
+  const loginMsg = document.getElementById('loginMsg');
+  
+  // Flag to track initial load success
+  let isLoggedIn = false;
+  let currentLicenses = []; // Server is the source of truth
+
+  // Utility to check if the admin cookie is present
+  function checkAdminCookie() {
+      // We rely on the Flask backend redirecting if the cookie is missing/invalid for page access.
+      // For API calls, we rely on the 401 response.
+      return document.cookie.split(';').some((item) => item.trim().startsWith('admin_logged_in=true'));
+  }
+
+  // --- API / Server Communication ---
+
+  async function apiFetch(url, options = {}) {
+    const defaultOptions = {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      ...options
+    };
+    try {
+      const response = await fetch(url, defaultOptions);
+      if (response.status === 401) {
+          // If we get 401 from API route, force logout/show modal
+          isLoggedIn = false;
+          showLoginModal('Your session expired. Please log in again.');
+          throw new Error('Session expired or unauthorized.');
+      }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: response.statusText }));
+        throw new Error(`API Error (${response.status}): ${errorData.message || response.statusText}`);
+      }
+      return response.json();
+    } catch (error) {
+      console.error('API Fetch Failed:', error);
+      throw error;
+    }
+  }
+
+  // --- Login / UI Control ---
+
+  function showLoginModal(msg = '') {
+    loginPass.value = '';
+    loginMsg.textContent = msg;
+    loginModal.style.display = 'flex';
+    loginModal.setAttribute('aria-hidden','false');
+    loginPass.focus();
+  }
+  function hideLoginModal() {
+    loginModal.style.display = 'none';
+    loginModal.setAttribute('aria-hidden','true');
+  }
+
+  btnLogin.addEventListener('click', async ()=>{
+    const entered = (loginPass.value || '').trim();
+    if (!entered) {
+      loginMsg.textContent = 'Enter admin password.';
+      return;
+    }
+    
+    loginMsg.textContent = 'Logging in...';
+    
+    try {
+      // POST password to Flask API
+      const response = await apiFetch('/api/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: entered })
+      });
+      
+      if (response.success) {
+        isLoggedIn = true;
+        hideLoginModal();
+        loginPass.value = '';
+        loginMsg.textContent = '';
+        message.textContent = 'Logged in successfully.';
+        message.className = 'note ok';
+        fetchAndRenderLicenses(); // Load data after successful login
+      } else {
+        loginMsg.textContent = response.message || 'Incorrect password.';
+        loginMsg.className = 'note danger';
+        loginPass.value = '';
+        loginPass.focus();
+      }
+    } catch (e) {
+      loginMsg.textContent = e.message || 'Login failed due to network error.';
+      loginMsg.className = 'note danger';
+      loginPass.value = '';
+    }
+  });
+
+  btnLogout.addEventListener('click', ()=>{
+    // Log out redirects to the Flask /logout route, which clears the cookie
+    window.location.href = '{{ url_for("logout") }}'; 
+  });
+
+  // --- License Operations ---
+
+  async function fetchAndRenderLicenses(){
+    if (!isLoggedIn) return; 
+    message.textContent = 'Loading licenses from server...';
+    message.className = 'note';
+    try{
+      const data = await apiFetch('/api/licenses');
+      currentLicenses = data.licenses || [];
+      renderLicenses();
+      message.textContent = 'Licenses loaded successfully.';
+      message.className = 'note ok';
+    } catch(e) {
+      // If the page was accessed with an expired cookie, this will likely hit the 401 handled above.
+      message.textContent = `Failed to load licenses: ${e.message}`;
+      message.className = 'note danger';
+    }
+  }
+
+  function renderLicenses(){
+    licensesBody.innerHTML = '';
+    if(currentLicenses.length === 0){
+      licensesTable.style.display = 'none';
+      return;
+    }
+    licensesTable.style.display = '';
+    currentLicenses.forEach((lic, idx) => {
+      const tr = document.createElement('tr');
+      const tdUser = document.createElement('td'); tdUser.textContent = lic.username;
+      const tdPass = document.createElement('td'); tdPass.textContent = lic.password;
+      // Truncate the ISO string for cleaner table view
+      const tdExp = document.createElement('td'); tdExp.textContent = lic.expiry.replace('T', ' ').replace(/\.\d+Z/, ' UTC');
+      const tdAct = document.createElement('td');
+      const btnRemove = document.createElement('button');
+      btnRemove.className = 'btn btn-ghost';
+      btnRemove.textContent = 'Remove';
+      // Use idx for server-side removal
+      btnRemove.onclick = async () => {
+        if (!confirm('Remove this license?')) return;
+        await deleteLicense(idx);
+      };
+      tdAct.appendChild(btnRemove);
+      tr.appendChild(tdUser); tr.appendChild(tdPass); tr.appendChild(tdExp); tr.appendChild(tdAct);
+      licensesBody.appendChild(tr);
+    });
+  }
+
+  async function generateLicense(){
+    const username = usernameEl.value.trim();
+    const hours = Number(hoursEl.value) || 0;
+    if(!username) return alert('Enter username');
+    if(!hours || hours <= 0) return alert('Enter hours > 0');
+
+    message.textContent = 'Generating and saving license...';
+    message.className = 'note';
+
+    try {
+      const data = await apiFetch('/api/generate', {
+        method: 'POST',
+        body: JSON.stringify({ username, hours })
+      });
+      
+      // Update local array and re-render
+      currentLicenses.push(data.license);
+      renderLicenses();
+      usernameEl.value = '';
+      message.textContent = `License generated for ${data.license.username} and saved to licenses.json.`;
+      message.className = 'note ok';
+    } catch (e) {
+      message.textContent = `Generation failed: ${e.message}`;
+      message.className = 'note danger';
+    }
+  }
+
+  async function deleteLicense(index) {
+    message.textContent = 'Deleting license...';
+    message.className = 'note';
+    try {
+      await apiFetch('/api/delete', {
+        method: 'POST',
+        body: JSON.stringify({ index })
+      });
+      
+      // Update local array and re-render
+      currentLicenses.splice(index, 1);
+      renderLicenses();
+      message.textContent = 'License removed successfully.';
+      message.className = 'note ok';
+    } catch (e) {
+      message.textContent = `Deletion failed: ${e.message}`;
+      message.className = 'note danger';
+    }
+  }
+  
+  btnGenerate.addEventListener('click', generateLicense);
+  btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
+
+  btnClearAll.addEventListener('click', async ()=>{
+    if (!isLoggedIn) { alert('Please login first'); return; }
+    if(!confirm('Clear all licenses? This cannot be undone.')) return;
+    
+    message.textContent = 'Clearing all licenses...';
+    message.className = 'note';
+    try {
+      await apiFetch('/api/clear_all', { method: 'POST' });
+      currentLicenses = [];
+      renderLicenses();
+      message.textContent = 'All licenses cleared.';
+      message.className = 'note ok';
+    } catch (e) {
+      message.textContent = `Clear all failed: ${e.message}`;
+      message.className = 'note danger';
+    }
+  });
+
+  btnDownloadAll.addEventListener('click', ()=>{
+    if (!isLoggedIn) { alert('Please login first'); return; }
+    // Triggers file download from the Flask server endpoint
+    window.open('{{ url_for("download_licenses_file") }}', '_blank');
+    message.textContent = 'licenses.json download initiated.';
+    message.className = 'note';
+  });
+
+  btnCopyAll.addEventListener('click', async ()=>{
+    if (!isLoggedIn) { alert('Please login first'); return; }
+    const txt = JSON.stringify({ licenses: currentLicenses }, null, 2);
+    try{ 
+      await navigator.clipboard.writeText(txt); 
+      message.textContent = 'licenses.json copied to clipboard'; 
+      message.className = 'note'; 
+    }
+    catch(e){ 
+      alert('Clipboard not available. Use download instead.'); 
+    }
+  });
+
+  // When Enter pressed in password field, attempt login
+  loginPass.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') btnLogin.click(); });
+
+  // --- Initialisation ---
+  // The Flask backend decorator (@admin_required) ensures this page is only served 
+  // if the admin cookie is present. If it is, we are 'logged in' for this session.
+  if (checkAdminCookie()) {
+      isLoggedIn = true;
+      hideLoginModal();
+      fetchAndRenderLicenses();
+  } else {
+      // If the Flask backend failed to set the cookie or we're on a non-server environment, 
+      // we rely solely on the explicit login and the 401 handlers.
+      showLoginModal('Enter the admin password to start the session.');
+  }
+
+})();
+</script>
+</body>
+</html>
