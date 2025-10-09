@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Admin — License Generator</title>
+<title>Admin — License Generator (Login required)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -40,6 +40,15 @@
   .danger{color:#ff8b8b}
   .ok{color:#bfffdc}
   footer{margin-top:18px; color:var(--muted); font-size:13px}
+
+  /* login modal */
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(2,6,12,0.6); display:flex; align-items:center; justify-content:center; z-index:9999;
+  }
+  .modal{width:100%; max-width:420px; background:linear-gradient(180deg, rgba(255,255,255,0.03), transparent); padding:20px; border-radius:12px; border:1px solid rgba(255,255,255,0.04); text-align:left}
+  .modal h3{margin:0 0 10px 0}
+  .muted-block{color:var(--muted); font-size:13px; margin-bottom:8px}
+  .logout{cursor:pointer; text-decoration:underline; font-size:13px; color:var(--muted)}
 </style>
 </head>
 <body>
@@ -47,7 +56,7 @@
     <header>
       <a class="brand" href="index.html"><div class="logo">IA</div><div><div style="font-weight:700">Interview Assistant</div><div class="small muted">Admin — License Generator</div></div></a>
       <div style="text-align:right">
-        <div class="small muted">Admin file (admin.json) must be loaded each session</div>
+        <div class="small muted">This page requires admin login on every access</div>
       </div>
     </header>
 
@@ -55,11 +64,11 @@
       <div class="card">
         <h2 style="margin:0 0 8px 0">Generate licenses</h2>
 
-        <!-- Admin file loader -->
-        <div id="adminLoader">
-          <label>Load admin.json (contains admin password)</label>
+        <!-- Admin file loader (only visible if fetch fails or admin.json isn't available) -->
+        <div id="adminLoader" class="card" style="margin-bottom:12px;">
+          <label>Load admin.json (server path: <code>/admin.json</code>)</label>
           <div class="row">
-            <input id="adminUrl" placeholder="Optional: raw URL to admin.json (GitHub raw...)">
+            <input id="adminUrl" placeholder="Optional: raw URL to admin.json (GitHub raw...)" />
             <button id="btnFetchAdmin" class="btn btn-ghost" style="flex:0 0 120px">Fetch</button>
           </div>
           <div style="height:8px"></div>
@@ -67,13 +76,10 @@
             <input id="adminFileInput" type="file" accept=".json">
             <button id="btnLoadFile" class="btn btn-ghost" style="flex:0 0 120px">Load file</button>
           </div>
-          <div id="adminStatus" class="note">No admin file loaded. Admin will be prompted every time.</div>
-          <div style="height:10px"></div>
+          <div id="adminStatus" class="note">Attempting to load <code>/admin.json</code> automatically...</div>
         </div>
 
-        <hr style="border:none;height:1px;background:rgba(255,255,255,0.02);margin:12px 0">
-
-        <div id="generateArea">
+        <div id="controls">
           <label>Username</label>
           <input id="username" placeholder="e.g. alice@example.com">
 
@@ -100,21 +106,37 @@
             <button id="btnDownloadAll" class="btn btn-primary">Download licenses.json</button>
             <button id="btnCopyAll" class="btn btn-ghost">Copy JSON</button>
             <button id="btnClearAll" class="btn btn-ghost">Clear all</button>
+            <button id="btnLogout" class="btn btn-ghost" title="End session">Logout</button>
           </div>
 
           <div class="note" style="margin-top:10px">
-            Each license is a JSON object `{ "username": "...", "password": "...", "expiry": "ISO" }`. You can combine them into a single `licenses.json` that your app will fetch from GitHub or host as raw content.
+            Each license is a JSON object `{ "username": "...", "password": "...", "expiry": "ISO" }`. Host `licenses.json` privately (raw GitHub is public).
           </div>
         </div>
       </div>
 
-      <!-- right column left intentionally empty (keeps layout balance) -->
       <aside class="card" style="display:none"></aside>
     </div>
 
     <footer>
       <div class="small muted">© <span id="year"></span> Interview Assistant — Admin</div>
     </footer>
+  </div>
+
+  <!-- Login modal: shown before access to the page -->
+  <div id="loginModal" class="modal-backdrop" style="display:none" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <h3 id="loginTitle">Admin login required</h3>
+      <div class="muted-block">Enter the admin password from <code>admin.json</code>. This is required on every page load. The file is loaded into memory only.</div>
+      <label for="loginPass">Password</label>
+      <input id="loginPass" type="password" placeholder="Admin password">
+      <div style="height:10px"></div>
+      <div class="row">
+        <button id="btnLogin" class="btn btn-primary">Log in</button>
+        <button id="btnReloadAdmin" class="btn btn-ghost">Reload admin.json</button>
+      </div>
+      <div id="loginMsg" class="note" style="margin-top:8px"></div>
+    </div>
   </div>
 
 <script>
@@ -138,104 +160,151 @@
   const btnDownloadAll = document.getElementById('btnDownloadAll');
   const btnCopyAll = document.getElementById('btnCopyAll');
   const btnClearAll = document.getElementById('btnClearAll');
+  const btnLogout = document.getElementById('btnLogout');
   const message = document.getElementById('message');
 
   const licensesTable = document.getElementById('licensesTable');
   const licensesBody = document.getElementById('licensesBody');
 
+  const loginModal = document.getElementById('loginModal');
+  const loginPass = document.getElementById('loginPass');
+  const btnLogin = document.getElementById('btnLogin');
+  const btnReloadAdmin = document.getElementById('btnReloadAdmin');
+  const loginMsg = document.getElementById('loginMsg');
+
   // in-memory admin data (never persisted)
-  // expected shapes supported:
-  // { "admin_password": "..." }  OR  { "password": "..." }  OR  { "admins": [{ "password": "..."}, ...] }
+  // supported shapes: { admin_password: "..."}  or { password: "..." } or { admins: [{password: "..."}] }
   let adminData = null;
-  let adminPrimaryPassword = null; // extracted password to check against
+  let adminPrimaryPassword = null; // extracted
 
-  function setAdminLoaded(sourceDesc){
-    adminStatus.textContent = `Admin file loaded (${sourceDesc}). Admin will be prompted for password on each action.`;
-    adminStatus.className = 'note ok';
-  }
-  function setAdminCleared(){
-    adminData = null; adminPrimaryPassword = null;
-    adminStatus.textContent = 'No admin file loaded. Please load admin.json to enable generation (or paste a URL).';
-    adminStatus.className = 'note';
-  }
-
-  // parse admin file object, extract a usable password
-  function loadAdminObject(obj){
-    if(!obj || typeof obj !== 'object') throw new Error('Invalid JSON object');
-    // try common keys
-    if(obj.admin_password && typeof obj.admin_password === 'string') {
-      adminPrimaryPassword = obj.admin_password;
-      adminData = obj;
-      return;
+  function tryExtractPassword(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    if (typeof obj.admin_password === 'string') return obj.admin_password;
+    if (typeof obj.password === 'string') return obj.password;
+    if (Array.isArray(obj.admins) && obj.admins.length && typeof obj.admins[0].password === 'string') return obj.admins[0].password;
+    // fallback: first string property
+    for (const k of Object.keys(obj)) {
+      if (typeof obj[k] === 'string') return obj[k];
     }
-    if(obj.password && typeof obj.password === 'string') {
-      adminPrimaryPassword = obj.password;
-      adminData = obj;
-      return;
-    }
-    if(Array.isArray(obj.admins) && obj.admins.length && obj.admins[0].password){
-      adminPrimaryPassword = obj.admins[0].password;
-      adminData = obj;
-      return;
-    }
-    // fallback: if single key with string value, take first string
-    const stringValKey = Object.keys(obj).find(k => typeof obj[k] === 'string');
-    if(stringValKey){
-      adminPrimaryPassword = obj[stringValKey];
-      adminData = obj;
-      return;
-    }
-    throw new Error('Could not find admin password in JSON. Expected keys: admin_password, password, admins[].password');
+    return null;
   }
 
-  // fetch admin JSON from a raw URL
-  btnFetchAdmin.addEventListener('click', async ()=>{
-    const url = (adminUrl.value || '').trim();
-    if(!url) return alert('Enter a raw URL to admin.json (e.g. raw.githubusercontent.com/...)');
-    adminStatus.textContent = 'Fetching admin.json...';
-    try{
-      const r = await fetch(url, { method: 'GET' });
-      if(!r.ok) throw new Error('Fetch failed: ' + r.status);
+  async function fetchAdminJson(url = './admin.json') {
+    adminStatus.textContent = `Loading admin.json from: ${url}`;
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
-      loadAdminObject(j);
-      setAdminLoaded('fetched URL');
-      message.textContent = 'Admin JSON fetched and parsed (in memory only).';
-      message.className = 'note ok';
-    }catch(err){
-      console.error(err);
-      adminStatus.textContent = 'Failed to fetch/parse admin.json: ' + err.message;
+      const pw = tryExtractPassword(j);
+      if (!pw) throw new Error('No password found in JSON');
+      adminData = j;
+      adminPrimaryPassword = pw;
+      adminStatus.textContent = `admin.json loaded from ${url} (password present).`;
+      adminStatus.className = 'note ok';
+      return true;
+    } catch (err) {
+      adminData = null; adminPrimaryPassword = null;
+      adminStatus.textContent = `Failed to load admin.json from ${url}: ${err.message}`;
       adminStatus.className = 'note danger';
-      alert('Failed to load admin.json: ' + err.message);
+      return false;
     }
-  });
+  }
 
-  // load admin JSON from a selected file
+  // try automatic fetch from same origin path first
+  (async ()=>{
+    const ok = await fetchAdminJson('./admin.json');
+    if (!ok) {
+      // try without leading slash as fallback
+      await fetchAdminJson('admin.json');
+    }
+    // show the login modal regardless — if admin.json not available user can load it via file/URL
+    showLoginModal();
+  })();
+
+  // file load handler
   btnLoadFile.addEventListener('click', ()=>{
-    const fi = adminFileInput;
-    if(!fi.files || fi.files.length === 0) return alert('Choose a local admin.json file first');
-    const f = fi.files[0];
+    if (!adminFileInput.files || adminFileInput.files.length === 0) {
+      alert('Choose an admin.json file first');
+      return;
+    }
+    const file = adminFileInput.files[0];
     const reader = new FileReader();
     reader.onload = (ev) => {
-      try{
-        const j = JSON.parse(ev.target.result);
-        loadAdminObject(j);
-        setAdminLoaded('local file');
-        message.textContent = 'Admin JSON loaded in memory (never saved).';
-        message.className = 'note ok';
-      }catch(err){
-        console.error(err);
-        adminStatus.textContent = 'Invalid admin.json file';
+      try {
+        const obj = JSON.parse(ev.target.result);
+        const pw = tryExtractPassword(obj);
+        if(!pw) throw new Error('No password found in JSON');
+        adminData = obj;
+        adminPrimaryPassword = pw;
+        adminStatus.textContent = 'admin.json loaded from local file (in memory only).';
+        adminStatus.className = 'note ok';
+        loginMsg.textContent = '';
+        // reopen login modal if closed
+        showLoginModal();
+      } catch(e) {
+        adminStatus.textContent = 'Invalid admin.json: ' + e.message;
         adminStatus.className = 'note danger';
-        alert('Failed to parse admin.json: ' + err.message);
+        alert('Failed to parse admin.json: ' + e.message);
       }
     };
-    reader.onerror = (e) => {
-      alert('File read error');
-    };
-    reader.readAsText(f);
+    reader.onerror = () => alert('File read error');
+    reader.readAsText(file);
   });
 
-  // license storage helpers (licenses stored in localStorage)
+  // fetch by URL handler
+  btnFetchAdmin.addEventListener('click', async ()=>{
+    const url = (adminUrl.value || '').trim();
+    if (!url) return alert('Enter a raw URL to admin.json (e.g. raw.githubusercontent.com/...)');
+    const ok = await fetchAdminJson(url);
+    if (ok) showLoginModal();
+  });
+
+  // login modal control
+  function showLoginModal() {
+    // always show login modal on page load
+    loginPass.value = '';
+    loginMsg.textContent = '';
+    loginModal.style.display = 'flex';
+    loginModal.setAttribute('aria-hidden','false');
+    loginPass.focus();
+  }
+  function hideLoginModal() {
+    loginModal.style.display = 'none';
+    loginModal.setAttribute('aria-hidden','true');
+  }
+
+  btnLogin.addEventListener('click', ()=>{
+    const entered = (loginPass.value || '').trim();
+    if (!adminPrimaryPassword) {
+      loginMsg.textContent = 'No admin.json loaded. Load it via file or URL then try again.';
+      return;
+    }
+    if (!entered) {
+      loginMsg.textContent = 'Enter admin password.';
+      return;
+    }
+    if (entered === adminPrimaryPassword) {
+      hideLoginModal();
+      loginPass.value = '';
+      loginMsg.textContent = '';
+      message.textContent = 'Logged in for this page visit. (You will be prompted again next time.)';
+      message.className = 'note ok';
+      renderLicenses();
+    } else {
+      loginMsg.textContent = 'Incorrect password.';
+      loginMsg.className = 'note danger';
+      loginPass.value = '';
+      loginPass.focus();
+    }
+  });
+
+  btnReloadAdmin.addEventListener('click', async ()=>{
+    // re-fetch from default path then show message
+    const ok = await fetchAdminJson('./admin.json') || await fetchAdminJson('admin.json');
+    if (ok) loginMsg.textContent = 'admin.json reloaded, enter password';
+  });
+
+  // license helpers (localStorage)
   function loadLicenses(){
     try{
       const raw = localStorage.getItem(LS_LICENSES);
@@ -250,6 +319,8 @@
     renderLicenses();
   }
   function renderLicenses(){
+    // don't show licenses if not logged in (modal visible)
+    if (loginModal.style.display !== 'none') return;
     const licenses = loadLicenses();
     licensesBody.innerHTML = '';
     if(licenses.length === 0){
@@ -266,107 +337,65 @@
       const btnRemove = document.createElement('button');
       btnRemove.className = 'btn btn-ghost';
       btnRemove.textContent = 'Remove';
-      btnRemove.onclick = () => {
-        if(!adminConfirm('remove this license')) return;
-        const arr = loadLicenses(); arr.splice(idx,1); saveLicenses(arr);
-      };
+      btnRemove.onclick = () => { if (!confirm('Remove this license?')) return; const arr = loadLicenses(); arr.splice(idx,1); saveLicenses(arr); };
       tdAct.appendChild(btnRemove);
       tr.appendChild(tdUser); tr.appendChild(tdPass); tr.appendChild(tdExp); tr.appendChild(tdAct);
       licensesBody.appendChild(tr);
     });
   }
 
-  // Prompt the admin for password and validate against loaded adminPrimaryPassword
-  // Always prompts (never caches admin confirmation)
-  function adminConfirm(actionLabel = 'perform this action'){
-    if(!adminPrimaryPassword){
-      alert('No admin.json loaded. Load admin.json first (local file or URL).');
-      return false;
-    }
-    const entered = prompt(`Admin password required to ${actionLabel}:`);
-    if(entered === null) return false;
-    if(entered === adminPrimaryPassword) return true;
-    alert('Incorrect admin password.');
-    return false;
-  }
-
   // password generator
-  function makePassword(){
-    return Math.random().toString(36).slice(2, 12);
-  }
+  function makePassword(){ return Math.random().toString(36).slice(2, 12); }
 
-  // license generation
+  // Generate license (only allowed if logged in)
   btnGenerate.addEventListener('click', ()=>{
-    if(!adminConfirm('generate a license')) return;
+    if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     const username = usernameEl.value.trim();
     const hours = Number(hoursEl.value) || 0;
     if(!username) return alert('Enter username');
     if(!hours || hours <= 0) return alert('Enter hours > 0');
-
     const expiry = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
     const password = makePassword();
     const license = { username, password, expiry };
-
-    const arr = loadLicenses();
-    arr.push(license);
-    saveLicenses(arr);
-
-    usernameEl.value = '';
-    message.textContent = `License generated for ${license.username} (expires ${expiry})`;
-    message.className = 'note ok';
+    const arr = loadLicenses(); arr.push(license); saveLicenses(arr);
+    usernameEl.value = ''; message.textContent = `License generated for ${license.username} (expires ${expiry})`; message.className = 'note ok';
   });
 
   btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
 
   btnClearAll.addEventListener('click', ()=>{
-    if(!adminConfirm('clear all licenses')) return;
+    if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     if(!confirm('Clear all licenses? This cannot be undone.')) return;
-    saveLicenses([]);
-    message.textContent = 'All licenses cleared.';
-    message.className = 'note';
+    saveLicenses([]); message.textContent = 'All licenses cleared.'; message.className = 'note';
   });
 
   btnDownloadAll.addEventListener('click', ()=>{
-    if(!adminConfirm('download licenses.json')) return;
+    if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     const obj = { licenses: loadLicenses() };
     const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
-    message.textContent = 'licenses.json downloaded';
-    message.className = 'note';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'licenses.json'; a.click();
+    message.textContent = 'licenses.json downloaded'; message.className = 'note';
   });
 
   btnCopyAll.addEventListener('click', async ()=>{
-    if(!adminConfirm('copy licenses JSON to clipboard')) return;
+    if (loginModal.style.display !== 'none') { alert('Please login first'); return; }
     const txt = JSON.stringify({ licenses: loadLicenses() }, null, 2);
-    try{
-      await navigator.clipboard.writeText(txt);
-      message.textContent = 'licenses.json copied to clipboard';
-      message.className = 'note';
-    }catch(e){
-      alert('Clipboard not available. Use download instead.');
-    }
+    try{ await navigator.clipboard.writeText(txt); message.textContent = 'licenses.json copied to clipboard'; message.className = 'note'; }
+    catch(e){ alert('Clipboard not available. Use download instead.'); }
   });
 
-  // helpers
-  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  btnLogout.addEventListener('click', ()=>{
+    // "logout" — require login again on next action / page interaction
+    showLoginModal();
+    message.textContent = 'Logged out — you will need to log in again.';
+    message.className = 'note';
+  });
+
+  // When Enter pressed in password field, attempt login
+  loginPass.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') btnLogin.click(); });
 
   // initial render
   renderLicenses();
-  setAdminCleared();
-
-  // optionally auto-load an admin file if admin.json URL passed in query ?admin=...
-  (function tryAutoLoadFromQuery(){
-    try{
-      const params = new URLSearchParams(window.location.search);
-      const a = params.get('admin');
-      if(!a) return;
-      // attempt to fetch raw URL immediately (no prompt)
-      fetch(a).then(r => r.json()).then(j => { loadAdminObject(j); setAdminLoaded('auto fetched'); })
-        .catch(e => { console.warn('Auto-load admin.json failed:', e); });
-    }catch(e){}
-  })();
-
 })();
 </script>
 </body>
