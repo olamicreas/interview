@@ -304,7 +304,7 @@
     if (ok) loginMsg.textContent = 'admin.json reloaded, enter password';
   });
 
-  // license helpers (localStorage)
+  // license helpers
   function loadLicenses(){
     try{
       const raw = localStorage.getItem(LS_LICENSES);
@@ -315,7 +315,16 @@
     }
   }
   function saveLicenses(arr){
+    // Save to localStorage
     localStorage.setItem(LS_LICENSES, JSON.stringify(arr));
+    // Save to licenses.json file
+    const obj = { licenses: arr };
+    const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+    const a = document.createElement('a'); 
+    a.href = URL.createObjectURL(blob); 
+    a.download = 'licenses.json'; 
+    a.click();
+    URL.revokeObjectURL(a.href); // Clean up
     renderLicenses();
   }
   function renderLicenses(){
@@ -358,7 +367,7 @@
     const password = makePassword();
     const license = { username, password, expiry };
     const arr = loadLicenses(); arr.push(license); saveLicenses(arr);
-    usernameEl.value = ''; message.textContent = `License generated for ${license.username} (expires ${expiry})`; message.className = 'note ok';
+    usernameEl.value = ''; message.textContent = `License generated for ${license.username} (expires ${expiry}) and saved to licenses.json`; message.className = 'note ok';
   });
 
   btnClear.addEventListener('click', ()=>{ usernameEl.value=''; hoursEl.value='2'; message.textContent=''; });
