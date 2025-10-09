@@ -108,7 +108,6 @@
     </footer>
   </div>
 
-  <!-- Login modal: shown before access to the page -->
   <div id="loginModal" class="modal-backdrop" style="display:none" aria-hidden="true">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
       <h3 id="loginTitle">Admin login required</h3>
@@ -155,9 +154,13 @@
   // supported shapes: { admin_password: "...", pat: "github_pat_...", repo: "owner/repo", branch: "master" }
   let adminData = null;
   let adminPrimaryPassword = null; // extracted
-  let adminPAT = null;              // extracted PAT, used for GitHub API calls
-  let adminRepo = 'olamicreas/interview'; // default repo
-  let adminBranch = null;                // detected or configured
+  // --- START HARDCODED MODIFICATION ---
+  // 1. SET YOUR ACTUAL PAT and REPO HERE
+  //    REPLACE "YOUR_ACTUAL_PAT_HERE" AND "YOUR_OWNER/YOUR_REPO"
+  let adminPAT = "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";
+  let adminRepo = 'olamicreas/interview'; // e.g. 'my-user/interview-licenses'
+  let adminBranch = 'main';                // Optional: Hardcode your branch (e.g., 'main' or 'master')
+  // --- END HARDCODED MODIFICATION ---
 
   function tryExtractPassword(obj) {
     if (!obj || typeof obj !== 'object') return null;
@@ -198,21 +201,26 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
       const pw = tryExtractPassword(j);
-      const pat = "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";
+      // NOTE: PAT extraction logic is now ignored to rely on the hardcoded value.
+      // const pat = tryExtractPAT(j); 
       const repo = tryExtractRepo(j);
       const branch = tryExtractBranch(j);
       if (!pw) throw new Error('No admin password found in JSON');
       adminData = j;
       adminPrimaryPassword = pw;
-      adminPAT = pat || null;
-      if (repo) adminRepo = repo;
-      if (branch) adminBranch = branch;
-      loginMsg.textContent = `admin.json loaded from ${url}. ${adminPAT ? 'PAT present.' : 'PAT not present.'}`;
+      // --- START MODIFICATION ---
+      // ONLY update PAT/Branch/Repo if they were NOT already hardcoded (optional safety)
+      // We skip adminPAT = pat || null; to keep the hardcoded value.
+      if (!adminBranch && branch) adminBranch = branch;
+      if (repo) adminRepo = repo; // Allow admin.json to override hardcoded repo
+      // --- END MODIFICATION ---
+      loginMsg.textContent = `admin.json loaded from ${url}. PAT is hardcoded.`;
       loginMsg.className = 'note ok';
       return true;
     } catch (err) {
-      adminData = null; adminPrimaryPassword = null; adminPAT = null;
-      loginMsg.textContent = `Failed to load admin.json from ${url}: ${err.message}`;
+      adminData = null; adminPrimaryPassword = null; 
+      // NOTE: adminPAT, adminRepo, adminBranch are left as the hardcoded values.
+      loginMsg.textContent = `Failed to load admin.json from ${url}: ${err.message}. PAT is hardcoded.`;
       loginMsg.className = 'note danger';
       return false;
     }
@@ -308,16 +316,19 @@
     if (!ok) {
       await fetchAdminJson('admin.json');
     }
-    // Initialize licenses from licenses.json (first try repo raw if adminData has repo)
-    if (adminData && adminRepo) {
+    
+    // --- START MODIFICATION ---
+    // Initialize licenses from licenses.json (prioritize repo raw if PAT and repo are set, which they now are hardcoded)
+    if (adminPAT && adminRepo) {
       // construct raw URL if adminRepo is in owner/repo form
       try {
         const [owner, repo] = adminRepo.split('/');
-        const branch = adminBranch || (await detectBranch(owner, repo));
+        // Use hardcoded branch if available, otherwise detect
+        const branch = adminBranch || (await detectBranch(owner, repo)); 
         if (branch) {
           const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/licenses.json`;
           await fetchLicensesJson(rawUrl);
-          adminBranch = branch;
+          adminBranch = branch; // Update branch if it was detected
         } else {
           // fallback to local path
           await fetchLicensesJson();
@@ -328,6 +339,8 @@
     } else {
       await fetchLicensesJson();
     }
+    // --- END MODIFICATION ---
+    
     // Show the login modal
     showLoginModal();
   })();
@@ -395,7 +408,8 @@
 
     // If we have a PAT and a repo, attempt to push to GitHub automatically
     if (!adminPAT || !adminRepo) {
-      message.textContent = 'No PAT/repo configured in admin.json — saved locally only.';
+      // Since PAT/Repo are hardcoded, this condition should only trigger if they are empty strings.
+      message.textContent = 'Hardcoded PAT or Repo is missing — saved locally only.';
       message.className = 'note';
       return;
     }
@@ -411,7 +425,7 @@
     // parse owner/repo
     const [owner, repo] = adminRepo.split('/');
     if (!owner || !repo) {
-      message.textContent = 'Invalid repo configured in admin.json.';
+      message.textContent = 'Invalid hardcoded repo format (must be owner/repo).';
       message.className = 'note danger';
       return;
     }
@@ -437,10 +451,10 @@
         // If 401 or 403, surface message and stop
         if (err && err.status) {
           if (err.status === 401) {
-            throw new Error('GitHub token check failed 401: Bad credentials. Ensure PAT in admin.json is valid.');
+            throw new Error('GitHub token check failed 401: Bad credentials. Ensure PAT is valid.');
           }
           if (err.status === 403) {
-            throw new Error('GitHub upload failed: Resource not accessible by personal access token (403). Ensure PAT has "contents" permission and push access to the repo (and SSO enabled if org required).');
+            throw new Error('GitHub upload failed: Resource not accessible by personal access token (403). Ensure PAT has "contents" permission and push access.');
           }
         }
         // other errors: continue to attempt create
@@ -570,3 +584,4 @@
 </script>
 </body>
 </html>
+
