@@ -1,9 +1,9 @@
-name: Build and Sign App
+name: Build, Sign, and Release InterviewAssistant
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # Trigger when you push a version tag, e.g., v1.0
 
 jobs:
   build:
@@ -21,22 +21,33 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyinstaller
-          pip install -r requirements.txt  # if you have other packages
+          if exist requirements.txt pip install -r requirements.txt
 
       - name: Build EXE
-        run: pyinstaller --onefile it.py
+        run: pyinstaller --onefile it.py --name InterviewAssistant
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      - name: Sign EXE (self-signed)
+      - name: List dist folder (debug)
+        run: dir dist
+
+      - name: Sign EXE (optional self-signed)
+        if: success() && env.SIGNING_CERT_PASSWORD != ''
         run: |
           certutil -f -p ${{ secrets.SIGNING_CERT_PASSWORD }} -importpfx "signing-cert.pfx"
-          signtool sign /f signing-cert.pfx /p ${{ secrets.SIGNING_CERT_PASSWORD }} /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/interviewAssistant.exe
+          signtool sign /f signing-cert.pfx /p ${{ secrets.SIGNING_CERT_PASSWORD }} /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/InterviewAssistant.exe
         env:
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
 
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: signed-exe
-          path: dist/interviewAssistant.exe
+          name: InterviewAssistant-signed
+          path: dist/InterviewAssistant.exe
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/InterviewAssistant.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
