@@ -32,13 +32,32 @@ jobs:
       - name: List dist folder (debug)
         run: dir dist
 
-      - name: Sign EXE (optional self-signed)
-        if: success() && env.SIGNING_CERT_PASSWORD != ''
+      - name: Restore signing cert
+        shell: pwsh
         run: |
-          certutil -f -p ${{ secrets.SIGNING_CERT_PASSWORD }} -importpfx "signing-cert.pfx"
-          signtool sign /f signing-cert.pfx /p ${{ secrets.SIGNING_CERT_PASSWORD }} /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/InterviewAssistant.exe
+          $b64 = "${{ secrets.SIGNING_CERT_B64 }}"
+          $bytes = [System.Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes("signing-cert.pfx", $bytes)
+
+      - name: Sign EXE
+        if: success() && env.SIGNING_CERT_PASSWORD != ''
+        shell: pwsh
+        run: |
+          & 'C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe' sign `
+            /f signing-cert.pfx `
+            /p "${{ secrets.SIGNING_CERT_PASSWORD }}" `
+            /tr http://timestamp.digicert.com `
+            /td sha256 /fd sha256 `
+            dist\InterviewAssistant.exe
         env:
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+
+      - name: Bump version and create tag
+        id: version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
 
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
@@ -49,6 +68,8 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          name: "InterviewAssistant ${{ steps.version.outputs.new_tag }}"
           files: dist/InterviewAssistant.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
