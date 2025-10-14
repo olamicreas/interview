@@ -1,0 +1,36 @@
+name: Build and Sign App
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller --onefile interviewAssistant.py
+
+      - name: Sign EXE (self-signed)
+        run: |
+          certutil -f -p "" -importpfx "signing-cert.pfx"
+          signtool sign /f signing-cert.pfx /p "" /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/interviewAssistant.exe
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-exe
+          path: dist/interviewAssistant.exe
