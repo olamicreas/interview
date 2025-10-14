@@ -6,6 +6,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Make sure these secrets exist in your repo settings:
+      # SIGNING_CERT_PFX (Base64), SIGNING_CERT_PASSWORD, GITHUB_TOKEN, OPENAI_API_KEY (optional)
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout repo
@@ -25,42 +29,112 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --onefile it.py --name InterviewAssistant
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pyinstaller --onefile it.py --name InterviewAssistant
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       - name: List dist folder (debug)
+        shell: cmd
         run: dir dist
 
-      - name: Restore signing certificate
+      - name: Restore signing certificate (decode Base64 secret -> signing-cert.pfx)
         shell: pwsh
         run: |
-          $b64 = "${{ secrets.SIGNING_CERT_B64 }}"
+          $ErrorActionPreference = "Stop"
+          if (-not $env:SIGNING_CERT_PFX -or $env:SIGNING_CERT_PFX -eq "") {
+            Write-Error "SIGNING_CERT_PFX secret is empty or missing. Add it to repository secrets."
+            exit 1
+          }
+          Write-Host "Decoding signing-cert.pfx..."
+          $b64 = "${{ secrets.SIGNING_CERT_PFX }}"
           $bytes = [System.Convert]::FromBase64String($b64)
           [IO.File]::WriteAllBytes("signing-cert.pfx", $bytes)
-          Write-Host "✅ PFX file restored successfully."
+          if (-not (Test-Path -Path "signing-cert.pfx")) {
+            Write-Error "Failed to write signing-cert.pfx"
+            exit 1
+          }
+          Write-Host "✅ signing-cert.pfx restored."
+
+      - name: Confirm PFX (debug)
+        shell: pwsh
+        run: |
+          Write-Host "PFX file size:"
+          Get-Item signing-cert.pfx | Select-Object Name, Length | Format-List
 
       - name: Find signtool dynamically
         id: find_signtool
         shell: pwsh
         run: |
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits" -Recurse -ErrorAction SilentlyContinue |
-                      Where-Object { $_.Name -eq "signtool.exe" } |
-                      Select-Object -First 1 -ExpandProperty FullName
-          if (-not $signtool) { throw "❌ signtool.exe not found" }
-          Write-Host "✅ Using signtool at: $signtool"
-          echo "SIGNSDK=$signtool" >> $env:GITHUB_ENV
+          $ErrorActionPreference = "Stop"
+          Write-Host "Searching for signtool.exe in Windows Kits..."
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                      Select-Object -First 1
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found on this runner."
+            exit 1
+          }
+          $full = $signtool.FullName
+          Write-Host "✅ Found signtool at: $full"
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGNSDK=$full"
 
-      - name: Sign the EXE
+      - name: Sign the EXE (with robust error handling)
+        shell: pwsh
+        env:
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (-not (Test-Path -Path "dist\InterviewAssistant.exe")) {
+            Write-Error "dist\\InterviewAssistant.exe not found. Build step may have failed."
+            exit 1
+          }
+
+          if (-not $env:SIGNSDK) {
+            Write-Error "SIGNSDK path not set. Previous step should have set this."
+            exit 1
+          }
+
+          Write-Host "Using signtool: $env:SIGNSDK"
+          Write-Host "Signing dist\\InterviewAssistant.exe ..."
+
+          try {
+            & "$env:SIGNSDK" sign `
+              /f signing-cert.pfx `
+              /p "${{ secrets.SIGNING_CERT_PASSWORD }}" `
+              /tr http://timestamp.digicert.com `
+              /td sha256 /fd sha256 `
+              dist\InterviewAssistant.exe
+
+            $lastExit = $LASTEXITCODE
+            if ($lastExit -ne 0) {
+              Write-Error "signtool returned exit code $lastExit"
+              throw "signtool failed with exit code $lastExit"
+            }
+
+            Write-Host "✅ Signing command completed."
+            exit 0
+          }
+          catch {
+            Write-Error "❌ Signing failed: $($_.Exception.Message)"
+            Write-Host "signtool stderr/exception: $($_)"
+            exit 1
+          }
+
+      - name: Verify signature
         shell: pwsh
         run: |
-          & "$env:SIGNSDK" sign `
-            /f signing-cert.pfx `
-            /p "${{ secrets.SIGNING_CERT_PASSWORD }}" `
-            /tr http://timestamp.digicert.com `
-            /td sha256 /fd sha256 `
-            dist\InterviewAssistant.exe
-          Write-Host "✅ Signing completed successfully."
+          $ErrorActionPreference = "Stop"
+          if (-not $env:SIGNSDK) { throw "SIGNSDK missing" }
+          Write-Host "Verifying signature on dist\\InterviewAssistant.exe..."
+          & "$env:SIGNSDK" verify /pa /v dist\InterviewAssistant.exe
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Signature verification failed (signtool returned $LASTEXITCODE)."
+            exit 1
+          }
+          Write-Host "✅ Signature verified."
 
       - name: Bump version and create tag
         id: version
@@ -69,17 +143,31 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: patch
 
+      - name: Generate checksum (SHA256) for release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "dist\InterviewAssistant.exe"
+          if (-not (Test-Path $exe)) { throw "$exe not found" }
+          $hash = Get-FileHash -Path $exe -Algorithm SHA256
+          $hash.Line | Out-File -FilePath dist\InterviewAssistant_SHA256.txt -Encoding ascii
+          Write-Host "Checksum generated at dist\\InterviewAssistant_SHA256.txt"
+
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
           name: InterviewAssistant-signed
-          path: dist/InterviewAssistant.exe
+          path: |
+            dist/InterviewAssistant.exe
+            dist/InterviewAssistant_SHA256.txt
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.new_tag }}
           name: "InterviewAssistant ${{ steps.version.outputs.new_tag }}"
-          files: dist/InterviewAssistant.exe
+          files: |
+            dist/InterviewAssistant.exe
+            dist/InterviewAssistant_SHA256.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
