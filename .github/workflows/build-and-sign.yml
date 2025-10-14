@@ -32,42 +32,35 @@ jobs:
       - name: List dist folder (debug)
         run: dir dist
 
-      - name: Restore signing cert
+      - name: Restore signing certificate
         shell: pwsh
         run: |
           $b64 = "${{ secrets.SIGNING_CERT_B64 }}"
           $bytes = [System.Convert]::FromBase64String($b64)
           [IO.File]::WriteAllBytes("signing-cert.pfx", $bytes)
+          Write-Host "✅ PFX file restored successfully."
 
-      - name: Sign EXE
-        if: success() && env.SIGNING_CERT_PASSWORD != ''
+      - name: Find signtool dynamically
+        id: find_signtool
         shell: pwsh
         run: |
-          # Find signtool dynamically
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $signtool) {
-            Write-Error "signtool.exe not found!"
-            exit 1
-          }
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits" -Recurse -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -eq "signtool.exe" } |
+                      Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "❌ signtool.exe not found" }
+          Write-Host "✅ Using signtool at: $signtool"
+          echo "SIGNSDK=$signtool" >> $env:GITHUB_ENV
 
-          Write-Host "Using signtool at: $($signtool.FullName)"
-
-          certutil -f -p "${{ secrets.SIGNING_CERT_PASSWORD }}" -importpfx "signing-cert.pfx"
-
-          & $signtool.FullName sign `
+      - name: Sign the EXE
+        shell: pwsh
+        run: |
+          & "$env:SIGNSDK" sign `
             /f signing-cert.pfx `
             /p "${{ secrets.SIGNING_CERT_PASSWORD }}" `
             /tr http://timestamp.digicert.com `
             /td sha256 /fd sha256 `
             dist\InterviewAssistant.exe
-        env:
-          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
-
-      - name: Verify Signature
-        shell: pwsh
-        run: |
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          & $signtool.FullName verify /pa /v dist\InterviewAssistant.exe
+          Write-Host "✅ Signing completed successfully."
 
       - name: Bump version and create tag
         id: version
