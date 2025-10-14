@@ -18,16 +18,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt  # if you have other packages
 
       - name: Build EXE
-        run: pyinstaller --onefile interviewAssistant.py
+        run: pyinstaller --onefile it.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Sign EXE (self-signed)
         run: |
-          certutil -f -p "" -importpfx "signing-cert.pfx"
-          signtool sign /f signing-cert.pfx /p "" /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/interviewAssistant.exe
+          certutil -f -p ${{ secrets.SIGNING_CERT_PASSWORD }} -importpfx "signing-cert.pfx"
+          signtool sign /f signing-cert.pfx /p ${{ secrets.SIGNING_CERT_PASSWORD }} /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist/interviewAssistant.exe
+        env:
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
 
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
