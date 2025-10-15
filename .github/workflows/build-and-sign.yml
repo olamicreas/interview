@@ -7,7 +7,6 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      # Optional: expose OPENAI_API_KEY to the build step if needed
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
@@ -57,7 +56,6 @@ jobs:
             exit 1
           }
 
-          # Safe debug: show length only (never print secret)
           Write-Host "Base64 secret length:" ([int]$b64.Length)
 
           try {
@@ -68,12 +66,10 @@ jobs:
           }
 
           [IO.File]::WriteAllBytes("signing-cert.pfx", $bytes)
-
           if (-not (Test-Path -Path "signing-cert.pfx")) {
             Write-Error "Failed to write signing-cert.pfx"
             exit 1
           }
-
           Write-Host "✅ signing-cert.pfx restored (size: $(Get-Item signing-cert.pfx).Length bytes)"
 
       - name: Confirm PFX (debug)
@@ -97,6 +93,33 @@ jobs:
           $full = $signtool.FullName
           Write-Host "✅ Found signtool at: $full"
           Add-Content -Path $env:GITHUB_ENV -Value "SIGNSDK=$full"
+
+      - name: Trust signing certificate temporarily (for verification)
+        shell: pwsh
+        env:
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Importing PFX to CurrentUser\\My and trusting public cert in CurrentUser\\Root..."
+
+          # Convert password and import to CurrentUser\My so we can export public cert
+          $pwd = ConvertTo-SecureString -String "${{ secrets.SIGNING_CERT_PASSWORD }}" -AsPlainText -Force
+          $pfxImported = Import-PfxCertificate -FilePath signing-cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pwd
+
+          if (-not $pfxImported) {
+            Write-Error "Failed to import PFX into CurrentUser\\My"
+            exit 1
+          }
+
+          # Export public certificate to a .cer file
+          $thumb = $pfxImported.Thumbprint
+          $cerPath = "$PWD\signing-cert.cer"
+          Export-Certificate -Cert "Cert:\CurrentUser\My\$thumb" -FilePath $cerPath -Force
+
+          # Import the public cert into CurrentUser\Root (trusted root for the current user)
+          Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+
+          Write-Host "✅ Signing certificate temporarily trusted for CurrentUser. Thumbprint: $thumb"
 
       - name: Sign the EXE (with robust error handling)
         shell: pwsh
@@ -153,6 +176,36 @@ jobs:
             exit 1
           }
           Write-Host "✅ Signature verified."
+
+      - name: Remove temporary trusted signing certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Removing any InterviewAssistant certs from CurrentUser\\Root and CurrentUser\\My..."
+
+          # Remove from CurrentUser\Root (trusted roots)
+          $rootCerts = Get-ChildItem Cert:\CurrentUser\Root | Where-Object { $_.Subject -like "*CN=InterviewAssistant*" }
+          if ($rootCerts) {
+            foreach ($c in $rootCerts) {
+              Write-Host "Removing from Root: $($c.Thumbprint) - $($c.Subject)"
+              Remove-Item -Path "Cert:\CurrentUser\Root\$($c.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "✅ Removed temporary cert(s) from CurrentUser\\Root"
+          } else {
+            Write-Host "No InterviewAssistant cert found in CurrentUser\\Root"
+          }
+
+          # Remove from CurrentUser\My (imported PFX)
+          $myCerts = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like "*CN=InterviewAssistant*" }
+          if ($myCerts) {
+            foreach ($m in $myCerts) {
+              Write-Host "Removing from My: $($m.Thumbprint) - $($m.Subject)"
+              Remove-Item -Path "Cert:\CurrentUser\My\$($m.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "✅ Removed signing PFX from CurrentUser\\My"
+          } else {
+            Write-Host "No InterviewAssistant cert found in CurrentUser\\My"
+          }
 
       - name: Bump version and create tag
         id: version
