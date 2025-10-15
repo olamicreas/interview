@@ -7,8 +7,7 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      # Make sure these secrets exist in your repo settings:
-      # SIGNING_CERT_PFX (Base64), SIGNING_CERT_PASSWORD, GITHUB_TOKEN, OPENAI_API_KEY (optional)
+      # Optional: expose OPENAI_API_KEY to the build step if needed
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
@@ -44,19 +43,38 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (-not $env:SIGNING_CERT_PFX -or $env:SIGNING_CERT_PFX -eq "") {
-            Write-Error "SIGNING_CERT_PFX secret is empty or missing. Add it to repository secrets."
+
+          # Read secret directly (secrets are expanded at workflow runtime)
+          $b64 = $null
+          if ("${{ secrets.SIGNING_CERT_PFX }}" -and "${{ secrets.SIGNING_CERT_PFX }}" -ne "") {
+            Write-Host "Using repository secret SIGNING_CERT_PFX."
+            $b64 = "${{ secrets.SIGNING_CERT_PFX }}"
+          } elseif ("${{ secrets.SIGNING_CERT_B64 }}" -and "${{ secrets.SIGNING_CERT_B64 }}" -ne "") {
+            Write-Host "Using repository secret SIGNING_CERT_B64 (fallback)."
+            $b64 = "${{ secrets.SIGNING_CERT_B64 }}"
+          } else {
+            Write-Error "No signing secret found. Please set SIGNING_CERT_PFX or SIGNING_CERT_B64 in repo secrets."
             exit 1
           }
-          Write-Host "Decoding signing-cert.pfx..."
-          $b64 = "${{ secrets.SIGNING_CERT_PFX }}"
-          $bytes = [System.Convert]::FromBase64String($b64)
+
+          # Safe debug: show length only (never print secret)
+          Write-Host "Base64 secret length:" ([int]$b64.Length)
+
+          try {
+            $bytes = [System.Convert]::FromBase64String($b64)
+          } catch {
+            Write-Error "Base64 decode failed: secret is not valid base64."
+            exit 1
+          }
+
           [IO.File]::WriteAllBytes("signing-cert.pfx", $bytes)
+
           if (-not (Test-Path -Path "signing-cert.pfx")) {
             Write-Error "Failed to write signing-cert.pfx"
             exit 1
           }
-          Write-Host "✅ signing-cert.pfx restored."
+
+          Write-Host "✅ signing-cert.pfx restored (size: $(Get-Item signing-cert.pfx).Length bytes)"
 
       - name: Confirm PFX (debug)
         shell: pwsh
