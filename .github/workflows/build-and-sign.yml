@@ -134,16 +134,20 @@ jobs:
           Write-Host "Subject: $($cert.Subject)"
           Write-Host "Issuer:  $($cert.Issuer)"
 
-          # Confirm the cert path exists
-          $certPath = "Cert:\CurrentUser\My\$thumb"
-          if (-not (Test-Path $certPath)) {
-            Write-Error "Certificate path $certPath not found after import."
-            exit 1
-          }
-
-          # Export public cert to .cer
+          # Export public cert to .cer using the cert object (more robust than string path)
           $cerPath = Join-Path $PWD "signing-cert.cer"
-          Export-Certificate -Cert $certPath -FilePath $cerPath -Force
+          try {
+            Export-Certificate -Cert $cert -FilePath $cerPath -Force -ErrorAction Stop
+          } catch {
+            Write-Error "Export-Certificate failed using object: $($_.Exception.Message)"
+            # fallback: try export via path string if object export fails
+            $certPath = "Cert:\CurrentUser\My\$thumb"
+            if (Test-Path $certPath) {
+              Export-Certificate -Cert $certPath -FilePath $cerPath -Force
+            } else {
+              exit 1
+            }
+          }
 
           if (-not (Test-Path $cerPath)) {
             Write-Error "Failed to export public certificate to $cerPath"
