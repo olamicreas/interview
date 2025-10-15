@@ -94,32 +94,67 @@ jobs:
           Write-Host "✅ Found signtool at: $full"
           Add-Content -Path $env:GITHUB_ENV -Value "SIGNSDK=$full"
 
-      - name: Trust signing certificate temporarily (for verification)
+      - name: Trust signing certificate temporarily (robust)
         shell: pwsh
         env:
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          Write-Host "Importing PFX to CurrentUser\\My and trusting public cert in CurrentUser\\Root..."
+          Write-Host "Importing PFX to CurrentUser\\My and trusting public cert in CurrentUser\\Root (robust)."
 
-          # Convert password and import to CurrentUser\My so we can export public cert
           $pwd = ConvertTo-SecureString -String "${{ secrets.SIGNING_CERT_PASSWORD }}" -AsPlainText -Force
-          $pfxImported = Import-PfxCertificate -FilePath signing-cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pwd
 
-          if (-not $pfxImported) {
-            Write-Error "Failed to import PFX into CurrentUser\\My"
+          # Import pfx; can return an array or single cert object
+          $importResult = Import-PfxCertificate -FilePath signing-cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pwd -Exportable -ErrorAction Stop
+
+          if ($null -eq $importResult) {
+            Write-Error "Import-PfxCertificate returned no object. Import may have failed."
             exit 1
           }
 
-          # Export public certificate to a .cer file
-          $thumb = $pfxImported.Thumbprint
-          $cerPath = "$PWD\signing-cert.cer"
-          Export-Certificate -Cert "Cert:\CurrentUser\My\$thumb" -FilePath $cerPath -Force
+          if ($importResult -is [System.Array]) {
+            $cert = $importResult | Select-Object -First 1
+          } else {
+            $cert = $importResult
+          }
 
-          # Import the public cert into CurrentUser\Root (trusted root for the current user)
+          # If thumbprint missing, fall back to searching by subject CN
+          $thumb = $cert.Thumbprint
+          if (-not $thumb) {
+            Write-Host "Imported object had no Thumbprint; falling back to search by subject..."
+            $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like "*CN=InterviewAssistant*" } | Select-Object -First 1
+            if (-not $cert) {
+              Write-Error "Could not find a certificate in CurrentUser\\My matching CN=InterviewAssistant."
+              exit 1
+            }
+            $thumb = $cert.Thumbprint
+          }
+
+          Write-Host "Imported certificate thumbprint: $thumb"
+          Write-Host "Subject: $($cert.Subject)"
+          Write-Host "Issuer:  $($cert.Issuer)"
+
+          # Confirm the cert path exists
+          $certPath = "Cert:\CurrentUser\My\$thumb"
+          if (-not (Test-Path $certPath)) {
+            Write-Error "Certificate path $certPath not found after import."
+            exit 1
+          }
+
+          # Export public cert to .cer
+          $cerPath = Join-Path $PWD "signing-cert.cer"
+          Export-Certificate -Cert $certPath -FilePath $cerPath -Force
+
+          if (-not (Test-Path $cerPath)) {
+            Write-Error "Failed to export public certificate to $cerPath"
+            exit 1
+          }
+
+          # Import the .cer into CurrentUser\Root so verify /pa trusts the chain
           Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
 
-          Write-Host "✅ Signing certificate temporarily trusted for CurrentUser. Thumbprint: $thumb"
+          Write-Host "✅ Signing certificate temporarily trusted for CurrentUser. Exported public cert to: $cerPath"
+          Write-Host "You can now sign and verify in this job run."
 
       - name: Sign the EXE (with robust error handling)
         shell: pwsh
