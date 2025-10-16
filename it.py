@@ -2,11 +2,17 @@
 """
 app.py — Interview Assistant (local login + push-to-talk GUI with Shift hold)
 
-- Local login/session replaces build-time expiry.
-- Hold SHIFT (while GUI focused) or hold the on-screen button to record.
-- Aggressive trimming + Opus/webm encoding via ffmpeg for smaller uploads.
-- Uses Whisper (OpenAI audio transcriptions) and OpenAI Responses for LLM answers.
-- Login is shown once; now validates credentials against the remote auth server.
+Improvements made:
+- Only send audio to Whisper when audio energy (RMS) passes a threshold.
+- Post-transcription, accept only English transcriptions (uses langdetect if available,
+  falls back to a fast ASCII-ratio heuristic).
+- Keep the "Recording..." status visible while Shift/button is held by preventing
+  the session timer from overwriting the recording label.
+- Lazy import of langdetect so startup remains fast if dependency isn't installed.
+- Everything else left intact (OpenAI usage, encoding flow, GUI behavior).
+
+If you add `langdetect` to your environment, language detection will be more reliable:
+    pip install langdetect==1.0.9
 """
 import os
 import io
@@ -28,6 +34,8 @@ from typing import Optional
 import uuid
 import datetime
 import getpass
+import array
+import string
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -50,7 +58,7 @@ BYTES_PER_SAMPLE = 2
 FRAME_DURATION_MS = int(os.environ.get("FRAME_DURATION_MS", "10"))  # must be 10/20/30
 FRAME_BYTES = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000) * BYTES_PER_SAMPLE
 
-# latency tuning
+# latency & trimming tuning
 VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "3"))
 PRE_ROLL_MS = float(os.environ.get("PRE_ROLL_MS", "80"))
 PRE_ROLL_FRAMES = max(1, int(PRE_ROLL_MS / FRAME_DURATION_MS))
@@ -58,6 +66,12 @@ PRE_ROLL_FRAMES = max(1, int(PRE_ROLL_MS / FRAME_DURATION_MS))
 TRIM_PRE_ROLL_MS = int(os.environ.get("TRIM_PRE_ROLL_MS", "60"))
 TRIM_PRE_ROLL_FRAMES = max(1, int(TRIM_PRE_ROLL_MS / FRAME_DURATION_MS))
 TRIM_MIN_KEEP_MS = int(os.environ.get("TRIM_MIN_KEEP_MS", "80"))
+
+# audio energy threshold (int16 RMS)
+AUDIO_MIN_RMS = float(os.environ.get("AUDIO_MIN_RMS", "400.0"))
+
+# English detection fallback heuristic (ascii letter ratio)
+ENGLISH_MIN_ALPHA_RATIO = float(os.environ.get("ENGLISH_MIN_ALPHA_RATIO", "0.60"))
 
 # SECURITY: use environment variables for API key
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -92,10 +106,8 @@ if not OPENAI_API_KEY:
     sys.exit(1)
 
 # Session/auth configuration (local)
-# 🎯 Set AUTH_SERVER_URL to the Render authentication endpoint
-AUTH_SERVER_URL = os.environ.get("AUTH_SERVER_URL", "https://interview-z1df.onrender.com/api/v1/licenses/auth")
-# 🎯 Disable GitHub check by clearing the default URL
-GITHUB_LICENSES_URL = os.environ.get("GITHUB_LICENSES_URL", "") 
+AUTH_SERVER_URL = os.environ.get("AUTH_SERVER_URL", "https://interview-z1df.onrender.com/api/v1/licenses/auth")   # optional remote auth endpoint
+GITHUB_LICENSES_URL = os.environ.get("GITHUB_LICENSES_URL", "")  # optional
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")     # optional local password for verification (empty = demo)
 SESSION_DURATION_MIN = int(os.environ.get("SESSION_DURATION_MIN", "120"))  # default session lifetime
 
@@ -184,7 +196,7 @@ class SessionManager:
             self.username = None
             self.expires_at = None
 
-    # --- GitHub licenses support ---
+    # --- GitHub licenses support (kept for completeness) ---
     def _fetch_github_licenses(self):
         if not self.github_url:
             return None
@@ -207,20 +219,12 @@ class SessionManager:
         return None
 
     def login_github(self, username: str, password: str) -> (bool, str):
-        """
-        Validate username/password against GitHub-hosted licenses JSON.
-        Expected formats:
-          - Mapping: { "alice": {"password":"pw","expiry":"ISO8601"}, ... }
-          - List: [ {"username":"alice","password":"pw","expiry":"ISO8601"}, ... ]
-        """
         j = self._fetch_github_licenses()
         if not j:
             return False, "Could not fetch licenses from GitHub."
 
-        # normalize to a list of entries
         entries = []
         if isinstance(j, dict):
-            # dict -> try mapping
             for k, v in j.items():
                 if isinstance(v, dict):
                     entries.append({
@@ -239,7 +243,6 @@ class SessionManager:
         else:
             return False, "Unsupported licenses.json format."
 
-        # find matching username
         match = None
         for e in entries:
             if not e.get("username"):
@@ -258,13 +261,11 @@ class SessionManager:
             if not dt:
                 return False, "Invalid expiry format in licenses."
             if dt.tzinfo is None:
-                # treat naive as UTC
                 dt = dt
             if self._now() > dt:
                 return False, "License expired."
             expires_at = dt
         else:
-            # if no expiry provided, fall back to SESSION_DURATION_MIN
             expires_at = self._now() + datetime.timedelta(minutes=SESSION_DURATION_MIN)
 
         with self.lock:
@@ -276,42 +277,31 @@ class SessionManager:
     # --- remote auth ---
     def login_remote(self, username: str, password: str) -> (bool, str):
         try:
-            # Note: AUTH_SERVER_URL includes the full endpoint path /api/v1/licenses/auth
             resp = requests.post(AUTH_SERVER_URL, json={"username": username, "password": password}, timeout=6)
-            
             if resp.status_code == 200:
                 j = resp.json()
                 token = j.get("token")
                 expires_in = j.get("expires_in")
-                
                 if not token:
                     return False, "Auth response missing token."
-                
-                # Use expires_in from the server response to set the session duration
                 if isinstance(expires_in, (int, float)) and expires_in > 0:
                     delta = datetime.timedelta(seconds=int(expires_in))
                     expires_at = self._now() + delta
                 else:
-                    # Fallback if server doesn't provide a valid expires_in
                     expires_at = self._now() + datetime.timedelta(minutes=SESSION_DURATION_MIN)
-                    
                 with self.lock:
                     self.username = username
                     self.token = token
                     self.expires_at = expires_at
                 return True, "Logged in (remote)."
-            
-            # Handle non-200 responses
             elif resp.status_code in (401, 403):
-                # 401: Invalid password/username; 403: Expired license
                 try:
                     error_msg = resp.json().get("error", f"Auth failed: {resp.status_code}")
                 except json.JSONDecodeError:
                     error_msg = f"Auth failed: {resp.status_code}"
                 return False, error_msg
             else:
-                 return False, f"Auth failed: HTTP {resp.status_code}"
-                 
+                return False, f"Auth failed: HTTP {resp.status_code}"
         except requests.RequestException as e:
             return False, f"Auth request failed: {e}"
         except Exception as e:
@@ -319,20 +309,13 @@ class SessionManager:
 
     # --- local fallback ---
     def login_local(self, username: str, password: str) -> (bool, str):
-        # NOTE: This remains as the final, internal-only fallback.
-        # Require both username and password
         if not username or not password:
             return False, "Username and password cannot be empty."
-
-        # If APP_PASSWORD is configured, verify against it
         if APP_PASSWORD:
             if password != APP_PASSWORD:
                 return False, "Invalid password."
         else:
-            # If no configured password, reject all logins (prevent open access)
             return False, "Local login disabled — no APP_PASSWORD set."
-
-        # If passed all checks, start session
         with self.lock:
             self.username = username
             self.token = str(uuid.uuid4())
@@ -340,30 +323,17 @@ class SessionManager:
         return True, "Logged in (local)."
 
     def login(self, username: str, password: str) -> (bool, str):
-        """
-        Updated login priority:
-        1. Remote Auth Server (via AUTH_SERVER_URL)
-        2. GitHub (Disabled by config)
-        3. Local (via APP_PASSWORD)
-        """
-        # 1. Try Remote Auth Server
         if AUTH_SERVER_URL:
             ok, msg = self.login_remote(username, password)
             if ok:
                 return True, msg
-            # If remote fails, return the specific failure message
             if "Auth request failed" in msg:
                  return False, f"Server unreachable: {msg}"
-            return False, msg # Return specific failure from the server (e.g., "Invalid password", "License expired")
-
-        # 2. Try GitHub licenses (now disabled by GITHUB_LICENSES_URL="")
+            return False, msg
         if self.github_url:
             ok, msg = self.login_github(username, password)
             if ok:
                 return True, msg
-            # If GitHub check is enabled but fails, we return the GitHub failure message unless it's a network error.
-
-        # 3. Try Local Fallback (only if remote/github failed or were not configured)
         return self.login_local(username, password)
 
 
@@ -406,6 +376,69 @@ def enforce_star_bullets(text: str, max_bullets: int = 3) -> str:
     if len(bullets) == 1:
         bullets.append("• Action: Briefly describe what you did.")
     return "\n".join(bullets[:max_bullets])
+
+# ------------------ Language detection helper (langdetect, lazy) ------------------
+_LANGDETECT_AVAILABLE = None  # tri-state: None = unknown, False = missing, True = available
+
+def _lazy_check_langdetect():
+    global _LANGDETECT_AVAILABLE
+    if _LANGDETECT_AVAILABLE is not None:
+        return _LANGDETECT_AVAILABLE
+    try:
+        global detect_langs
+        from langdetect import detect_langs  # type: ignore
+        _LANGDETECT_AVAILABLE = True
+    except Exception:
+        detect_langs = None  # type: ignore
+        _LANGDETECT_AVAILABLE = False
+    return _LANGDETECT_AVAILABLE
+
+def looks_like_english(s: str, prob_threshold: float = 0.80) -> bool:
+    """
+    Return True if text s is likely English.
+    - Prefer langdetect if available: require top result 'en' with probability >= prob_threshold.
+    - Fallback: ASCII letter/space ratio >= ENGLISH_MIN_ALPHA_RATIO.
+    """
+    if not s or not s.strip():
+        return False
+    # use langdetect if available
+    if _lazy_check_langdetect():
+        try:
+            langs = detect_langs(s)
+            if not langs:
+                return False
+            top = langs[0]
+            if getattr(top, "lang", "") == "en" and getattr(top, "prob", 0.0) >= prob_threshold:
+                return True
+            return False
+        except Exception:
+            # fallback to heuristic
+            pass
+    # ASCII letter/space heuristic
+    letters = sum(1 for ch in s if ch in (string.ascii_letters + " "))
+    ratio = letters / max(1, len(s))
+    return ratio >= ENGLISH_MIN_ALPHA_RATIO
+
+# ------------------ Audio RMS helper ------------------
+def audio_rms(raw_pcm: bytes) -> float:
+    """
+    Compute RMS (root mean square) for 16-bit PCM mono data.
+    Returns float RMS.
+    """
+    if not raw_pcm:
+        return 0.0
+    try:
+        a = array.array('h')  # signed short
+        a.frombytes(raw_pcm)
+        if len(a) == 0:
+            return 0.0
+        s = 0
+        for x in a:
+            s += x * x
+        mean_sq = s / len(a)
+        return mean_sq ** 0.5
+    except Exception:
+        return 0.0
 
 # ------------------ Recorder ------------------
 class LiveRecorder:
@@ -583,6 +616,13 @@ def whisper_upload_fileobj_webm(fileobj: io.BytesIO, filename="audio.webm", cont
 
 # ------------------ Push-to-talk (non-blocking) ------------------
 def process_push_buffer_and_queue(raw_bytes: bytes):
+    """
+    Entry point to process captured raw PCM bytes. This function:
+      - checks audio RMS and discards low-energy captures,
+      - trims silence using VAD,
+      - encodes and uploads to Whisper,
+      - validates language and only enqueues English transcripts.
+    """
     if not raw_bytes:
         console.print("[yellow]Push-to-talk: no audio captured.[/yellow]")
         return
@@ -596,6 +636,18 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
             pass
         return
 
+    # 1) quick RMS check to avoid sending background noise
+    rms = audio_rms(raw_bytes)
+    console.print(f"[dim]Captured audio RMS: {rms:.1f} (threshold {AUDIO_MIN_RMS})[/dim]")
+    if rms < AUDIO_MIN_RMS:
+        console.print("[yellow]Audio too quiet — discarding capture (likely silence/background).[/yellow]")
+        try:
+            _ui_q.put_nowait(("__error__", "No speech detected (too quiet)."))
+        except Exception:
+            pass
+        return
+
+    # 2) trim silence locally
     trimmed_local = trim_silence_pcm_fast(raw_bytes)
     orig_len = len(raw_bytes)
     trimmed_len = len(trimmed_local)
@@ -614,11 +666,15 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
                     text = resp_json.get("text", "").strip()
                     if text:
                         console.print(f"\n[bold cyan]Transcribed question (push-to-talk):[/bold cyan] {text}")
-                        if text.lower().strip() in ("exit", "quit", "bye"):
-                            _question_q.put(None)
-                            os._exit(0)
-                        _question_q.put(text)
-                        return
+                        # Accept only English transcriptions and non-trivial content
+                        if looks_like_english(text) and len(text.split()) >= 2:
+                            if text.lower().strip() in ("exit", "quit", "bye"):
+                                _question_q.put(None)
+                                os._exit(0)
+                            _question_q.put(text)
+                            return
+                        else:
+                            console.print("[yellow]Transcription rejected: not English or too short.[/yellow]")
                     else:
                         console.print("[yellow]Whisper returned empty transcript for webm upload.[/yellow]")
                 else:
@@ -630,11 +686,14 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
             text = resp_json.get("text", "").strip()
             if text:
                 console.print(f"\n[bold cyan]Transcribed question (push-to-talk WAV fallback):[/bold cyan] {text}")
-                if text.lower().strip() in ("exit", "quit", "bye"):
-                    _question_q.put(None)
-                    os._exit(0)
-                _question_q.put(text)
-                return
+                if looks_like_english(text) and len(text.split()) >= 2:
+                    if text.lower().strip() in ("exit", "quit", "bye"):
+                        _question_q.put(None)
+                        os._exit(0)
+                    _question_q.put(text)
+                    return
+                else:
+                    console.print("[yellow]Transcription rejected: not English or too short.[/yellow]")
             else:
                 console.print("[yellow]Whisper returned empty transcript for WAV upload.[/yellow]")
 
@@ -795,7 +854,6 @@ class LoginDialog(QDialog):
             return
 
         self.btn_login.setEnabled(False)
-        # Use the updated session manager login
         ok, msg = session_mgr.login(username, password)
         self.btn_login.setEnabled(True)
         if ok:
@@ -873,6 +931,11 @@ class PushToTalkGUI(QWidget):
             self._login_dialog_open = False
 
     def _session_tick(self):
+        # If currently recording, do not overwrite the status label.
+        global push_recording
+        if push_recording:
+            return
+
         # if session expires while running, prompt login only once
         if not session_mgr.is_active():
             self.set_status("Session expired — please log in", "#c0392b")
@@ -920,6 +983,7 @@ class PushToTalkGUI(QWidget):
             self.set_status(f"Recorder error: {e}", "#c0392b")
             return
         push_recording = True
+        # Keep the recording label visible until release
         self.set_status("Recording... release to send", "#b58900")
         self.answer_box.clear()
 
@@ -954,6 +1018,7 @@ class PushToTalkGUI(QWidget):
                     self.set_status(f"Recorder error: {e}", "#c0392b")
                     return
                 push_recording = True
+                # ensure the recording label stays until key release
                 self.set_status("Recording (Shift held)...", "#b58900")
                 self.answer_box.clear()
         super().keyPressEvent(event)
@@ -996,7 +1061,6 @@ def cli_login_prompt():
     print("Login required.")
     username = input("Username: ").strip()
     password = getpass.getpass("Password: ").strip()
-    # Use the updated session manager login
     ok, msg = session_mgr.login(username, password)
     if not ok:
         print("Login failed:", msg)
