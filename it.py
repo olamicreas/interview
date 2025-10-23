@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-app.py — Interview Assistant (patched)
+app.py — Interview Assistant (remote login only + push-to-talk GUI with Shift hold + device selector)
 
-Changes in this patched version:
-- Remote-only login (AUTH_SERVER_URL must be set).
-- Uses langdetect to filter transcripts to English only (fast).
-- Avoids sending very short/noisy captures (VAD + min-length checks).
-- Recorder can select a loopback/system-audio device by substring via AUDIO_DEVICE env var.
-- GUI status won't be overwritten while recording (Recording label persists until release).
-- Tuned default trimming minimum to reduce spurious short uploads.
-
-Note: install new dependency:
-    pip install langdetect==1.0.9
+Changes from original:
+- Remote-only login (uses AUTH_SERVER_URL).
+- Tiny device selector dropdown (choose input device; refresh).
+- Trim silence more aggressively: if no speech detected, discard capture.
+- Language detection (langdetect) to allow English-only transcripts.
+- GUI status "Recording..." remains visible until release.
 """
-
 import os
 import io
 import queue
@@ -34,6 +29,7 @@ from typing import Optional
 import uuid
 import datetime
 import getpass
+from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -43,13 +39,9 @@ from pynput import keyboard  # optional global keyboard listener
 # PySide6 GUI
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QTextEdit,
-    QDialog, QFormLayout, QLineEdit, QMessageBox
+    QDialog, QFormLayout, QLineEdit, QMessageBox, QComboBox, QHBoxLayout
 )
 from PySide6.QtCore import QTimer, Qt
-
-# language detection
-from langdetect import detect_langs, DetectorFactory
-DetectorFactory.seed = 0  # deterministic
 
 console = Console()
 
@@ -65,10 +57,9 @@ VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "3"))
 PRE_ROLL_MS = float(os.environ.get("PRE_ROLL_MS", "80"))
 PRE_ROLL_FRAMES = max(1, int(PRE_ROLL_MS / FRAME_DURATION_MS))
 
-# increased min keep to avoid tiny noises being accepted
 TRIM_PRE_ROLL_MS = int(os.environ.get("TRIM_PRE_ROLL_MS", "60"))
 TRIM_PRE_ROLL_FRAMES = max(1, int(TRIM_PRE_ROLL_MS / FRAME_DURATION_MS))
-TRIM_MIN_KEEP_MS = int(os.environ.get("TRIM_MIN_KEEP_MS", "160"))  # increased from 80
+TRIM_MIN_KEEP_MS = int(os.environ.get("TRIM_MIN_KEEP_MS", "80"))
 
 # SECURITY: use environment variables for API key
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -102,20 +93,11 @@ if not OPENAI_API_KEY:
     console.print("[bold red]Error:[/bold red] OPENAI_API_KEY env var not set. Export your key and retry.")
     sys.exit(1)
 
-# Session/auth configuration (remote-only)
-AUTH_SERVER_URL = os.environ.get("AUTH_SERVER_URL")  # must be set to remote auth endpoint
+# Session/auth configuration (remote only)
+AUTH_SERVER_URL = os.environ.get("AUTH_SERVER_URL")  # MUST be set for remote login
 if not AUTH_SERVER_URL:
-    console.print("[bold red]Error:[/bold red] AUTH_SERVER_URL must be set for remote-only login.")
+    console.print("[bold red]Error:[/bold red] AUTH_SERVER_URL env var not set. This app requires remote login.")
     sys.exit(1)
-
-# allow specifying a loopback audio device substring (e.g., "Stereo Mix", "BlackHole", "VB-Audio")
-AUDIO_DEVICE_NAME = os.environ.get("AUDIO_DEVICE", "")
-
-# English detection / filter thresholds
-MIN_TRANSCRIPT_CHARS = int(os.environ.get("MIN_TRANSCRIPT_CHARS", "4"))
-MIN_EN_CONF = float(os.environ.get("MIN_EN_CONF", "0.80"))
-
-SESSION_DURATION_MIN = int(os.environ.get("SESSION_DURATION_MIN", "120"))  # default session lifetime
 
 # ---------------------------------------------------
 
@@ -148,11 +130,26 @@ push_recording = False
 push_buffer = bytearray()
 push_lock = threading.Lock()
 
-# ------------------ Session Manager (remote-only) ------------------
+# Audio device selection (global var; updated by GUI)
+AUDIO_DEVICE_NAME = os.environ.get("AUDIO_DEVICE", "")  # optional substring or full name
+
+# Optional: language detection
+try:
+    from langdetect import detect
+    _HAS_LANGDETECT = True
+except Exception:
+    _HAS_LANGDETECT = False
+    def detect(text):
+        # fallback naive heuristic: check for common English words
+        sample = (text or "").lower()
+        common = (" the ", " and ", " is ", " I ", " you ", " a ")
+        return "en" if any(w in sample for w in common) else "unknown"
+
+# ------------------ Session Manager (remote only) ------------------
 class SessionManager:
     """
     Session manager (remote-only):
-    - Uses AUTH_SERVER_URL for authentication. No local or GitHub fallback.
+    - Uses AUTH_SERVER_URL to validate username/password and receive token/expires_in.
     """
     def __init__(self):
         self.token: Optional[str] = None
@@ -184,18 +181,17 @@ class SessionManager:
 
     def login_remote(self, username: str, password: str) -> (bool, str):
         try:
-            resp = requests.post(AUTH_SERVER_URL, json={"username": username, "password": password}, timeout=8)
-            # Expecting 200 with JSON {"token": "...", "expires_in": 3600}
+            resp = requests.post(AUTH_SERVER_URL, json={"username": username, "password": password}, timeout=6)
             if resp.status_code == 200:
                 j = resp.json()
                 token = j.get("token")
-                expires_in = j.get("expires_in")
+                expires_in = j.get("expires_in", None)
                 if not token:
                     return False, "Auth response missing token."
                 if isinstance(expires_in, (int, float)) and expires_in > 0:
                     expires_at = self._now() + datetime.timedelta(seconds=int(expires_in))
                 else:
-                    expires_at = self._now() + datetime.timedelta(minutes=SESSION_DURATION_MIN)
+                    expires_at = self._now() + datetime.timedelta(minutes=120)
                 with self.lock:
                     self.username = username
                     self.token = token
@@ -216,8 +212,7 @@ class SessionManager:
 
     def login(self, username: str, password: str) -> (bool, str):
         # Remote-only login
-        ok, msg = self.login_remote(username, password)
-        return ok, msg
+        return self.login_remote(username, password)
 
 session_mgr = SessionManager()
 
@@ -259,21 +254,52 @@ def enforce_star_bullets(text: str, max_bullets: int = 3) -> str:
         bullets.append("• Action: Briefly describe what you did.")
     return "\n".join(bullets[:max_bullets])
 
+# ------------------ Audio device helpers ------------------
+def list_input_devices():
+    try:
+        devs = sd.query_devices()
+        inputs = []
+        for i, d in enumerate(devs):
+            if d.get('max_input_channels', 0) > 0:
+                inputs.append((i, d.get('name', f'device-{i}')))
+        return inputs
+    except Exception as e:
+        console.print(f"[yellow]Failed to query audio devices: {e}[/yellow]")
+        return []
+
+def resolve_device_index(device_name_substr: str):
+    if not device_name_substr:
+        return None
+    try:
+        devs = sd.query_devices()
+        target = device_name_substr.lower()
+        # 1) exact match
+        for i, d in enumerate(devs):
+            n = d.get('name','').lower()
+            if d.get('max_input_channels', 0) > 0 and n == target:
+                return i
+        # 2) substring match
+        for i, d in enumerate(devs):
+            n = d.get('name','').lower()
+            if d.get('max_input_channels', 0) > 0 and target in n:
+                return i
+    except Exception as e:
+        console.print(f"[yellow]resolve_device_index error: {e}[/yellow]")
+    return None
+
 # ------------------ Recorder ------------------
 class LiveRecorder:
     """
     RawInputStream opened only while recording to reduce overhead.
-    Blocksize slightly reduced for lower latency.
-    Accepts a device name substring to choose a specific input (e.g., loopback device).
+    Uses selected device if AUDIO_DEVICE_NAME is set.
     """
-    def __init__(self, samplerate=SAMPLE_RATE, blocksize=int(SAMPLE_RATE * 0.03), dtype='int16', channels=1, device_name: str = None):
+    def __init__(self, samplerate=SAMPLE_RATE, blocksize=int(SAMPLE_RATE * 0.03), dtype='int16', channels=1):
         self.samplerate = samplerate
         self.blocksize = blocksize
         self.dtype = dtype
         self.channels = channels
         self.stream = None
         self._running = False
-        self.device_name = device_name
 
     def _callback(self, indata, frames, time_info, status):
         if status:
@@ -282,37 +308,36 @@ class LiveRecorder:
         with push_lock:
             push_buffer.extend(data)
 
-    def _resolve_device(self):
-        if not self.device_name:
-            return None
-        try:
-            devs = sd.query_devices()
-            for idx, d in enumerate(devs):
-                if self.device_name.lower() in d['name'].lower():
-                    return idx
-        except Exception:
-            pass
-        return None
-
     def start(self):
         if self._running:
             return
         with push_lock:
             push_buffer.clear()
-        device_idx = self._resolve_device()
+
+        device_index = resolve_device_index(AUDIO_DEVICE_NAME) if AUDIO_DEVICE_NAME else None
+
         try:
-            self.stream = sd.RawInputStream(
-                samplerate=self.samplerate,
-                blocksize=self.blocksize,
-                dtype=self.dtype,
-                channels=self.channels,
-                callback=self._callback,
-                device=device_idx  # None selects default
-            )
+            if device_index is not None:
+                self.stream = sd.RawInputStream(
+                    samplerate=self.samplerate,
+                    blocksize=self.blocksize,
+                    dtype=self.dtype,
+                    channels=self.channels,
+                    callback=self._callback,
+                    device=device_index
+                )
+            else:
+                self.stream = sd.RawInputStream(
+                    samplerate=self.samplerate,
+                    blocksize=self.blocksize,
+                    dtype=self.dtype,
+                    channels=self.channels,
+                    callback=self._callback
+                )
             self.stream.start()
             self._running = True
         except Exception as e:
-            console.print(f"[red]Failed to open audio input (device={self.device_name} idx={device_idx}): {e}[/red]")
+            console.print(f"[red]Failed to start audio stream: {e}[/red]")
             raise
 
     def stop(self):
@@ -328,21 +353,28 @@ class LiveRecorder:
             data = bytes(push_buffer)
         return data
 
-recorder = LiveRecorder(device_name=AUDIO_DEVICE_NAME)
+recorder = LiveRecorder()
 
 # ------------------ Silence trimming ------------------
 def trim_silence_pcm_fast(raw_pcm: bytes, pre_roll_frames=TRIM_PRE_ROLL_FRAMES, min_keep_ms=TRIM_MIN_KEEP_MS) -> bytes:
+    """
+    Trim silence using webrtcvad. If no speech frames are detected, return empty bytes to avoid sending silence.
+    """
     if not raw_pcm or len(raw_pcm) < FRAME_BYTES * 2:
-        return raw_pcm
+        return b""
     frames = [raw_pcm[i:i+FRAME_BYTES] for i in range(0, len(raw_pcm), FRAME_BYTES) if len(raw_pcm[i:i+FRAME_BYTES]) == FRAME_BYTES]
     if not frames:
-        return raw_pcm
+        return b""
     speech_flags = []
     for f in frames:
         try:
             speech_flags.append(vad.is_speech(f, SAMPLE_RATE))
         except Exception:
-            speech_flags.append(True)
+            # if VAD fails for any frame, assume non-speech for safety
+            speech_flags.append(False)
+    # if no speech frames at all, return empty -> caller will discard
+    if not any(speech_flags):
+        return b""
     first = None
     last = None
     for idx, v in enumerate(speech_flags):
@@ -354,14 +386,14 @@ def trim_silence_pcm_fast(raw_pcm: bytes, pre_roll_frames=TRIM_PRE_ROLL_FRAMES, 
             last = idx
             break
     if first is None or last is None:
-        return raw_pcm
+        return b""
     start = max(0, first - pre_roll_frames)
     end = min(len(frames)-1, last + pre_roll_frames)
     trimmed_frames = frames[start:end+1]
     trimmed = b"".join(trimmed_frames)
     min_keep_bytes = int((SAMPLE_RATE * (min_keep_ms / 1000.0)) * BYTES_PER_SAMPLE)
     if len(trimmed) < min_keep_bytes:
-        return raw_pcm
+        return b""
     return trimmed
 
 # ------------------ Encoding ------------------
@@ -453,35 +485,14 @@ def whisper_upload_fileobj_webm(fileobj: io.BytesIO, filename="audio.webm", cont
             time.sleep(WHISPER_BACKOFF_BASE * (2 ** (attempt - 1)))
     return None
 
-# ------------------ Helpers: English detection and filters ------------------
-def is_english_text(text: str) -> bool:
-    """
-    Return True if text is likely English with sufficient confidence.
-    Conservative: short/incomplete text tends to be rejected.
-    """
-    if not text:
-        return False
-    text = text.strip()
-    if len(text) < MIN_TRANSCRIPT_CHARS:
-        return False
-    # quick ASCII-letter check
-    if not re.search(r'[A-Za-z]', text):
-        return False
-    try:
-        langs = detect_langs(text)
-        if not langs:
-            return False
-        top = langs[0]
-        lang = getattr(top, 'lang', '')
-        prob = float(getattr(top, 'prob', 0.0))
-        return (lang == 'en') and (prob >= MIN_EN_CONF)
-    except Exception:
-        return False
-
 # ------------------ Push-to-talk (non-blocking) ------------------
 def process_push_buffer_and_queue(raw_bytes: bytes):
     if not raw_bytes:
-        console.print("[yellow]Push-to-talk: no audio captured.[/yellow]")
+        console.print("[yellow]Push-to-talk: no audio captured (or trimmed as silence).[/yellow]")
+        try:
+            _ui_q.put_nowait(("__error__", "No audio detected."))
+        except Exception:
+            pass
         return
 
     # block uploads if session inactive
@@ -494,18 +505,20 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
         return
 
     trimmed_local = trim_silence_pcm_fast(raw_bytes)
+    if not trimmed_local:
+        console.print("[yellow]Trimmed away as silence — discarding upload.[/yellow]")
+        try:
+            _ui_q.put_nowait(("__error__", "No speech detected (silence)."))
+        except Exception:
+            pass
+        return
+
     orig_len = len(raw_bytes)
     trimmed_len = len(trimmed_local)
     if trimmed_len < orig_len:
         console.print(f"[green]Trimmed audio: {orig_len} -> {trimmed_len} bytes ({(100*trimmed_len/orig_len):.0f}%) — encoding/uploading trimmed[/green]")
     else:
         console.print(f"[green]No trimming applied (uploading full capture: {orig_len} bytes)[/green]")
-
-    # require a short minimum (avoid tiny noise)
-    min_bytes = int((SAMPLE_RATE * 0.12) * BYTES_PER_SAMPLE)  # 120ms minimum
-    if len(trimmed_local) < min_bytes:
-        console.print("[yellow]Trimmed audio too short — likely noise. Discarding.[/yellow]")
-        return
 
     def _job(trimmed_bytes: bytes):
         # try webm/opus first
@@ -516,16 +529,25 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
                 if resp_json and isinstance(resp_json, dict):
                     text = resp_json.get("text", "").strip()
                     if text:
-                        # English filter
-                        if not is_english_text(text):
-                            console.print(f"[yellow]Discarding non-English or too-short transcript: '{text}'[/yellow]")
-                        else:
-                            console.print(f"\n[bold cyan]Transcribed question (push-to-talk):[/bold cyan] {text}")
-                            if text.lower().strip() in ("exit", "quit", "bye"):
-                                _question_q.put(None)
-                                os._exit(0)
-                            _question_q.put(text)
+                        console.print(f"\n[bold cyan]Transcribed question (push-to-talk):[/bold cyan] {text}")
+                        # language check
+                        lang = None
+                        try:
+                            lang = detect(text)
+                        except Exception:
+                            lang = None
+                        if lang and lang != "en":
+                            console.print(f"[yellow]Non-English detected ({lang}) — ignoring transcript.[/yellow]")
+                            try:
+                                _ui_q.put_nowait(("__error__", f"Non-English detected ({lang}) — not processed."))
+                            except Exception:
+                                pass
                             return
+                        if text.lower().strip() in ("exit", "quit", "bye"):
+                            _question_q.put(None)
+                            os._exit(0)
+                        _question_q.put(text)
+                        return
                     else:
                         console.print("[yellow]Whisper returned empty transcript for webm upload.[/yellow]")
                 else:
@@ -536,20 +558,28 @@ def process_push_buffer_and_queue(raw_bytes: bytes):
         if resp_json and isinstance(resp_json, dict):
             text = resp_json.get("text", "").strip()
             if text:
-                if not is_english_text(text):
-                    console.print(f"[yellow]Discarding non-English or too-short transcript: '{text}'[/yellow]")
-                else:
-                    console.print(f"\n[bold cyan]Transcribed question (push-to-talk WAV fallback):[/bold cyan] {text}")
-                    if text.lower().strip() in ("exit", "quit", "bye"):
-                        _question_q.put(None)
-                        os._exit(0)
-                    _question_q.put(text)
+                console.print(f"\n[bold cyan]Transcribed question (push-to-talk WAV fallback):[/bold cyan] {text}")
+                lang = None
+                try:
+                    lang = detect(text)
+                except Exception:
+                    lang = None
+                if lang and lang != "en":
+                    console.print(f"[yellow]Non-English detected ({lang}) — ignoring transcript.[/yellow]")
+                    try:
+                        _ui_q.put_nowait(("__error__", f"Non-English detected ({lang}) — not processed."))
+                    except Exception:
+                        pass
                     return
+                if text.lower().strip() in ("exit", "quit", "bye"):
+                    _question_q.put(None)
+                    os._exit(0)
+                _question_q.put(text)
+                return
             else:
                 console.print("[yellow]Whisper returned empty transcript for WAV upload.[/yellow]")
 
         if ALLOW_WHISPER_FALLBACK:
-            # fallback prompt if you want something always
             _question_q.put("Can you describe a time you led a team?")
 
     EXECUTOR.submit(_job, trimmed_local)
@@ -613,20 +643,23 @@ def llm_worker(dummy_mode: bool = False):
         console.print("[magenta]Querying AI (final answer only)...[/magenta]")
 
         assistant_text = ""
-        try:
-            create_params = {
-                "model": OPENAI_CHAT_MODEL,
-                "input": messages,
-                "max_output_tokens": FALLBACK_MAX_OUTPUT_TOKENS,
-                "reasoning": {"effort": REASONING_EFFORT},
-            }
-            if VERBOSITY:
-                create_params["verbosity"] = VERBOSITY
-            resp = client.responses.create(**create_params)
-            assistant_text = extract_text_from_response_object(resp)
-        except Exception as e:
-            console.print(f"[red]Responses.create() failed:[/red] {e}")
-            assistant_text = f"[Error communicating with LLM: {e}]"
+        if dummy_mode:
+            assistant_text = "• Situation: faced a tight deadline. • Action: organized resources. • Result: delivered on time."
+        else:
+            try:
+                create_params = {
+                    "model": OPENAI_CHAT_MODEL,
+                    "input": messages,
+                    "max_output_tokens": FALLBACK_MAX_OUTPUT_TOKENS,
+                    "reasoning": {"effort": REASONING_EFFORT},
+                }
+                if VERBOSITY:
+                    create_params["verbosity"] = VERBOSITY
+                resp = client.responses.create(**create_params)
+                assistant_text = extract_text_from_response_object(resp)
+            except Exception as e:
+                console.print(f"[red]Responses.create() failed:[/red] {e}")
+                assistant_text = f"[Error communicating with LLM: {e}]"
 
         normalized = enforce_star_bullets(assistant_text)
 
@@ -715,7 +748,7 @@ class PushToTalkGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Interview Assistant — Hold to Record (Fast)")
-        self.setFixedSize(520, 380)
+        self.setFixedSize(560, 420)
 
         # ensure the window receives keyboard events (Shift)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -725,6 +758,17 @@ class PushToTalkGUI(QWidget):
         self.status = QLabel("Not logged in")
         self.status.setStyleSheet("background-color: #333333; color: white; padding: 6px;")
         layout.addWidget(self.status)
+
+        # Device selector row (tiny)
+        dev_row = QHBoxLayout()
+        self.device_select = QComboBox()
+        self.device_select.setToolTip("Choose input device (Stereo Mix / Virtual Cable etc.)")
+        self.device_refresh_btn = QPushButton("Refresh")
+        self.device_refresh_btn.setFixedWidth(88)
+        self.device_refresh_btn.setStyleSheet("font-size:12px; padding:6px;")
+        dev_row.addWidget(self.device_select)
+        dev_row.addWidget(self.device_refresh_btn)
+        layout.addLayout(dev_row)
 
         self.btn = QPushButton("Hold to Record")
         self.btn.setFixedHeight(70)
@@ -755,8 +799,15 @@ class PushToTalkGUI(QWidget):
         # internal guard to avoid multiple / overlapping login dialogs
         self._login_dialog_open = False
 
+        # connect device UI
+        self.device_refresh_btn.clicked.connect(self.populate_devices)
+        self.device_select.currentIndexChanged.connect(self.on_device_selected)
+
+        # populate devices on init
+        QTimer.singleShot(80, self.populate_devices)
+
         # require login at start — scheduled slightly later so window finishes init
-        QTimer.singleShot(50, self.ensure_logged_in)
+        QTimer.singleShot(120, self.ensure_logged_in)
 
     def ensure_logged_in(self):
         # Avoid opening multiple dialogs at once (race from timers)
@@ -780,13 +831,7 @@ class PushToTalkGUI(QWidget):
             self._login_dialog_open = False
 
     def _session_tick(self):
-        # do not overwrite the status while actively recording
-        global push_recording
-        if push_recording:
-            # keep the recording status shown until release
-            return
-
-        # previous behavior:
+        # if session expires while running, prompt login only once
         if not session_mgr.is_active():
             self.set_status("Session expired — please log in", "#c0392b")
             if self._login_dialog_open:
@@ -819,6 +864,41 @@ class PushToTalkGUI(QWidget):
             self.status.setStyleSheet("background-color: #333333; color: white; padding: 6px;")
         self.status.setText(text)
 
+    # Device UI
+    def populate_devices(self):
+        try:
+            saved_name = AUDIO_DEVICE_NAME or ""
+            devices = list_input_devices()
+            self.device_select.blockSignals(True)
+            self.device_select.clear()
+            for idx, name in devices:
+                display = f"{name} (#{idx})"
+                self.device_select.addItem(display, (idx, name))
+            self.device_select.blockSignals(False)
+            # try to select a matching entry
+            if saved_name:
+                for i in range(self.device_select.count()):
+                    _, n = self.device_select.itemData(i)
+                    if saved_name.lower() in n.lower() or n.lower() in saved_name.lower():
+                        self.device_select.setCurrentIndex(i)
+                        break
+        except Exception as e:
+            console.print(f"[yellow]populate_devices error: {e}[/yellow]")
+
+    def on_device_selected(self, qindex):
+        global AUDIO_DEVICE_NAME
+        try:
+            data = self.device_select.itemData(qindex)
+            if not data:
+                AUDIO_DEVICE_NAME = ""
+                self.set_status("Using default input device")
+            else:
+                idx, name = data
+                AUDIO_DEVICE_NAME = name
+                self.set_status(f"Using input: {AUDIO_DEVICE_NAME}")
+        except Exception as e:
+            console.print(f"[yellow]on_device_selected error: {e}[/yellow]")
+
     # GUI button handlers
     def on_press(self):
         if not session_mgr.is_active():
@@ -833,6 +913,7 @@ class PushToTalkGUI(QWidget):
             self.set_status(f"Recorder error: {e}", "#c0392b")
             return
         push_recording = True
+        # IMPORTANT: keep "Recording" visible until release
         self.set_status("Recording... release to send", "#b58900")
         self.answer_box.clear()
 
@@ -840,6 +921,8 @@ class PushToTalkGUI(QWidget):
         global push_recording
         if not session_mgr.is_active():
             self.set_status("Session expired — please log in", "#c0392b")
+            return
+        if not push_recording:
             return
         push_recording = False
         self.set_status("Encoding/uploading (fast)...", "#268bd2")
@@ -897,10 +980,13 @@ class PushToTalkGUI(QWidget):
                 if question is None and answer is None:
                     return
                 if question == "__error__":
+                    # show error message in status bar
                     self.set_status(answer, "#c0392b")
                     continue
                 self.answer_box.setPlainText(answer)
-                self.set_status("Ready")
+                # only set Ready when not currently recording
+                if not push_recording:
+                    self.set_status("Ready")
         except queue.Empty:
             pass
 
